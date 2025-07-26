@@ -49,6 +49,7 @@ import com.amazonaws.services.s3.transfer.Upload;
 import org.apache.druid.java.util.common.ISE;
 
 import java.io.File;
+import java.util.concurrent.Executors;
 
 /**
  * {@link AmazonS3} wrapper with {@link ServerSideEncryption}. Every {@link AmazonS3#putObject},
@@ -79,6 +80,7 @@ public class ServerSideEncryptingAmazonS3
           .withS3Client(amazonS3)
           .withMinimumUploadPartSize(transferConfig.getMinimumUploadPartSize())
           .withMultipartUploadThreshold(transferConfig.getMultipartUploadThreshold())
+          .withExecutorFactory(() -> Executors.newFixedThreadPool(transferConfig.getNumExecutorThreads()))
           .build();
     } else {
       this.transferManager = null;

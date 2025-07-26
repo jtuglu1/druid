@@ -38,6 +38,10 @@ public class S3TransferConfig
   @Min(1)
   private long multipartUploadThreshold = 20 * 1024 * 1024L;
 
+  @JsonProperty
+  @Min(1)
+  private int numExecutorThreads = 10;
+
   public void setUseTransferManager(boolean useTransferManager)
   {
     this.useTransferManager = useTransferManager;
@@ -68,4 +72,13 @@ public class S3TransferConfig
     return multipartUploadThreshold;
   }
 
+  public int getNumExecutorThreads()
+  {
+    return numExecutorThreads;
+  }
+
+  public void setNumExecutorThreads(int numExecutorThreads)
+  {
+    this.numExecutorThreads = numExecutorThreads;
+  }
 }

@@ -31,6 +31,7 @@ public class S3TransferConfigTest
     Assert.assertTrue(config.isUseTransferManager());
     Assert.assertEquals(20 * 1024 * 1024L, config.getMinimumUploadPartSize());
     Assert.assertEquals(20 * 1024 * 1024L, config.getMultipartUploadThreshold());
+    Assert.assertEquals(10, config.getNumExecutorThreads());
   }
 
   @Test
@@ -55,5 +56,13 @@ public class S3TransferConfigTest
     S3TransferConfig config = new S3TransferConfig();
     config.setMultipartUploadThreshold(10 * 1024 * 1024L);
     Assert.assertEquals(10 * 1024 * 1024L, config.getMultipartUploadThreshold());
+  }
+
+  @Test
+  public void testSetNumExecutorThreads()
+  {
+    S3TransferConfig config = new S3TransferConfig();
+    config.setNumExecutorThreads(5);
+    Assert.assertEquals(5, config.getNumExecutorThreads());
   }
 }
