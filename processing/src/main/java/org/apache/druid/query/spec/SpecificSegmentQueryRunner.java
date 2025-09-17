@@ -21,6 +21,7 @@ package org.apache.druid.query.spec;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
+import com.google.common.collect.ImmutableMap;
 import org.apache.druid.java.util.common.guava.Accumulator;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.SequenceWrapper;
@@ -30,6 +31,7 @@ import org.apache.druid.java.util.common.guava.Yielders;
 import org.apache.druid.java.util.common.guava.YieldingAccumulator;
 import org.apache.druid.query.Queries;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.context.ResponseContext;
@@ -63,10 +65,19 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
   {
     final QueryPlus<T> queryPlus = input.withQuery(
         Queries.withSpecificSegments(
-            input.getQuery(),
-            Collections.singletonList(specificSpec.getDescriptor())
-        )
-    );
+                   input.getQuery(),
+                   Collections.singletonList(specificSpec.getDescriptor())
+               )
+               // Apply per-segment timeout
+               .withOverriddenContext(
+                   ImmutableMap.of(
+                       QueryContexts.TIMEOUT_KEY,
+                       Math.min(
+                           input.getQuery().context().getTimeout(),
+                           input.getQuery().context().getPerSegmentTimeout()
+                       )
+                   )
+               ));
 
     final boolean setName = input.getQuery().context().getBoolean(CTX_SET_THREAD_NAME, true);
 
