@@ -36,7 +36,7 @@ import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
-import org.apache.druid.query.MetricsEmittingQueryRunner;
+import org.apache.druid.query.MetricsEmittingSegmentQueryRunner;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
@@ -222,15 +222,15 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .build();
 
     StubServiceEmitter stubServiceEmitter = new StubServiceEmitter("", "");
-    MetricsEmittingQueryRunner<Result<TimeseriesResultValue>> metricsEmittingQueryRunner =
-        new MetricsEmittingQueryRunner<>(
+    MetricsEmittingSegmentQueryRunner<Result<TimeseriesResultValue>> metricsEmittingSegmentQueryRunner =
+        new MetricsEmittingSegmentQueryRunner<>(
             stubServiceEmitter,
             new TimeseriesQueryQueryToolChest(),
             runner,
             (obj, lng) -> {},
             (metrics) -> {}
         ).withWaitMeasuredFromNow();
-    Iterable<Result<TimeseriesResultValue>> results = metricsEmittingQueryRunner.run(QueryPlus.wrap(query)).toList();
+    Iterable<Result<TimeseriesResultValue>> results = metricsEmittingSegmentQueryRunner.run(QueryPlus.wrap(query)).toList();
 
     final String[] expectedIndex = descending ?
                                    QueryRunnerTestHelper.EXPECTED_FULL_ON_INDEX_VALUES_DESC :

@@ -2282,11 +2282,9 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
     int segments = segmentIds.size();
     emitter.verifyEmitted("query/cpu/time", 1);
     Assert.assertEquals(segments, emitter.getMetricEvents("query/segment/time").size());
-    Assert.assertEquals(segments, emitter.getMetricEvents("query/segmentAndCache/time").size());
     Assert.assertEquals(segments, emitter.getMetricEvents("query/wait/time").size());
     for (String id : segmentIds) {
       Assert.assertTrue(emitter.getMetricEvents("query/segment/time").stream().anyMatch(value -> value.getUserDims().containsValue(id)));
-      Assert.assertTrue(emitter.getMetricEvents("query/segmentAndCache/time").stream().anyMatch(value -> value.getUserDims().containsValue(id)));
       Assert.assertTrue(emitter.getMetricEvents("query/wait/time").stream().anyMatch(value -> value.getUserDims().containsValue(id)));
     }
   }

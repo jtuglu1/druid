@@ -44,6 +44,10 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.Optional;
 
+/**
+ * A query runner that polls the segment-level cache for a pre-computed result for the given query.
+ * Used by both historical and realtime data nodes.
+ */
 public class CachingQueryRunner<T> implements QueryRunner<T>
 {
   private final String cacheId;
@@ -56,6 +60,7 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
   private final ObjectMapper mapper;
   private final CachePopulator cachePopulator;
   private final CacheConfig cacheConfig;
+  private final Function<Boolean, Void> cachePollCallback;
 
   public CachingQueryRunner(
       String cacheId,
@@ -67,7 +72,8 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
       QueryToolChest toolchest,
       QueryRunner<T> base,
       CachePopulator cachePopulator,
-      CacheConfig cacheConfig
+      CacheConfig cacheConfig,
+      Function<Boolean, Void> cachePollCallback
   )
   {
     this.cacheKeyPrefix = cacheKeyPrefix;
@@ -80,6 +86,7 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
     this.mapper = mapper;
     this.cachePopulator = cachePopulator;
     this.cacheConfig = cacheConfig;
+    this.cachePollCallback = cachePollCallback;
   }
 
   @Override
@@ -105,6 +112,8 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
       final Function cacheFn = strategy.pullFromSegmentLevelCache();
       final byte[] cachedResult = cache.get(key);
       if (cachedResult != null) {
+        // Cache hit
+        this.cachePollCallback.apply(true);
         final TypeReference cacheObjectClazz = strategy.getCacheObjectClazz();
 
         return Sequences.map(
@@ -139,6 +148,8 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
         );
       }
     }
+
+    this.cachePollCallback.apply(false);
 
     if (populateCache) {
       final Function cacheFn = strategy.prepareForSegmentLevelCache();

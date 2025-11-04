@@ -249,6 +249,8 @@ public interface QueryMetrics<QueryType extends Query<?>>
 
   void segment(String segmentIdentifier);
 
+  void segmentCacheHit(boolean hit);
+
   /**
    * If a projection was used during segment processing, set its name as the projection dimension
    */
@@ -350,16 +352,6 @@ public interface QueryMetrics<QueryType extends Query<?>>
    * Emitted once per segment.
    */
   QueryMetrics<QueryType> reportSegmentTime(long timeNs);
-
-  /**
-   * Registers "segmentAndCache time" metric.
-   *
-   * Measures the total wall-clock time spent in processing threads, either operating on segments or retrieving items
-   * from cache.
-   *
-   * Emitted once per segment.
-   */
-  QueryMetrics<QueryType> reportSegmentAndCacheTime(long timeNs);
 
   /**
    * Emits iff a given query polled the result-level cache and the success of that operation.

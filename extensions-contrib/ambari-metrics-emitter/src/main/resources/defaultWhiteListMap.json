@@ -38,10 +38,6 @@
     "dataSource",
     "type"
   ],
-  "query/segmentAndCache/time": [
-    "dataSource",
-    "type"
-  ],
   "query/time": [
     "dataSource",
     "type"

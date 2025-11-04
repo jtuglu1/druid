@@ -22,8 +22,6 @@ package org.apache.druid.segment.realtime.appenderator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import org.apache.druid.client.CachingQueryRunner;
 import org.apache.druid.client.cache.Cache;
 import org.apache.druid.client.cache.CacheConfig;
@@ -32,23 +30,17 @@ import org.apache.druid.client.cache.ForegroundCachePopulator;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.guava.FunctionalIterable;
-import org.apache.druid.java.util.common.guava.LazySequence;
-import org.apache.druid.java.util.common.guava.Sequence;
-import org.apache.druid.java.util.common.guava.SequenceWrapper;
-import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.query.BySegmentQueryRunner;
 import org.apache.druid.query.CPUTimeMetricQueryRunner;
 import org.apache.druid.query.DataSource;
-import org.apache.druid.query.DefaultQueryMetrics;
 import org.apache.druid.query.DirectQueryProcessingPool;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
+import org.apache.druid.query.MetricsEmittingSegmentQueryRunner;
 import org.apache.druid.query.NoopQueryRunner;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryDataSource;
-import org.apache.druid.query.QueryMetrics;
-import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryProcessingPool;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
@@ -59,7 +51,6 @@ import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.ReportTimelineMissingSegmentQueryRunner;
 import org.apache.druid.query.SegmentDescriptor;
 import org.apache.druid.query.SinkQueryRunners;
-import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.planning.ExecutionVertex;
 import org.apache.druid.query.policy.PolicyEnforcer;
 import org.apache.druid.query.spec.SpecificSegmentQueryRunner;
@@ -80,7 +71,6 @@ import org.apache.druid.utils.CloseableUtils;
 import org.apache.druid.utils.JvmUtils;
 import org.joda.time.Interval;
 
-import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -88,10 +78,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.ObjLongConsumer;
 import java.util.stream.Collectors;
 
 /**
@@ -101,19 +90,6 @@ public class SinkQuerySegmentWalker implements QuerySegmentWalker
 {
   private static final EmittingLogger log = new EmittingLogger(SinkQuerySegmentWalker.class);
   private static final String CONTEXT_SKIP_INCREMENTAL_SEGMENT = "skipIncrementalSegment";
-
-  private static final Set<String> SEGMENT_QUERY_METRIC = ImmutableSet.of(DefaultQueryMetrics.QUERY_SEGMENT_TIME);
-  private static final Set<String> SEGMENT_CACHE_AND_WAIT_METRICS = ImmutableSet.of(
-      DefaultQueryMetrics.QUERY_WAIT_TIME,
-      DefaultQueryMetrics.QUERY_SEGMENT_AND_CACHE_TIME
-  );
-
-  private static final Map<String, ObjLongConsumer<? super QueryMetrics<?>>> METRICS_TO_REPORT =
-      ImmutableMap.of(
-          DefaultQueryMetrics.QUERY_SEGMENT_TIME, QueryMetrics::reportSegmentTime,
-          DefaultQueryMetrics.QUERY_SEGMENT_AND_CACHE_TIME, QueryMetrics::reportSegmentAndCacheTime,
-          DefaultQueryMetrics.QUERY_WAIT_TIME, QueryMetrics::reportWaitTime
-      );
 
   private final String dataSource;
 
@@ -222,7 +198,7 @@ public class SinkQuerySegmentWalker implements QuerySegmentWalker
     final List<SinkSegmentReference> allSegmentReferences = new ArrayList<>();
     final Map<SegmentDescriptor, SegmentId> segmentIdMap = new HashMap<>();
     final LinkedHashMap<SegmentDescriptor, List<QueryRunner<T>>> allRunners = new LinkedHashMap<>();
-    final ConcurrentHashMap<String, SinkMetricsEmittingQueryRunner.SegmentMetrics> segmentMetricsAccumulator = new ConcurrentHashMap<>();
+    final ConcurrentHashMap<String, MetricsEmittingSegmentQueryRunner.SegmentMetrics> segmentMetricsAccumulator = new ConcurrentHashMap<>();
 
     try {
       for (final SegmentDescriptor descriptor : specs) {
@@ -261,14 +237,10 @@ public class SinkQuerySegmentWalker implements QuerySegmentWalker
               descriptor,
               sinkSegmentReferences.stream().map(
                   segmentReference -> {
-                    QueryRunner<T> runner = new SinkMetricsEmittingQueryRunner<>(
-                        emitter,
-                        factory.getToolchest(),
-                        factory.createRunner(segmentReference.getSegment()),
-                        segmentMetricsAccumulator,
-                        SEGMENT_QUERY_METRIC,
-                        sinkSegmentId.toString()
-                    );
+                    // AtomicBoolean to track whether the cache was hit for this hydrant query
+                    final AtomicBoolean cacheHit = new AtomicBoolean(false);
+                    
+                    QueryRunner<T> runner = factory.createRunner(segmentReference.getSegment());
 
                     // 1) Only use caching if data is immutable
                     // 2) Hydrants are not the same between replicas, make sure cache is local
@@ -298,20 +270,21 @@ public class SinkQuerySegmentWalker implements QuerySegmentWalker
                               cachePopulatorStats,
                               cacheConfig.getMaxEntrySize()
                           ),
-                          cacheConfig
+                          cacheConfig,
+                          cacheHit
                       );
                     }
 
-                    // Regardless of whether caching is enabled, do reportSegmentAndCacheTime outside the
-                    // *possible* caching.
-                    runner = new SinkMetricsEmittingQueryRunner<>(
+                    // Wrap with metrics emission that tracks segment time and cache hits
+                    runner = new MetricsEmittingSegmentQueryRunner<>(
                         emitter,
                         factory.getToolchest(),
                         runner,
                         segmentMetricsAccumulator,
-                        SEGMENT_CACHE_AND_WAIT_METRICS,
-                        sinkSegmentId.toString()
-                    );
+                        MetricsEmittingSegmentQueryRunner.METRICS_SEGMENT_AND_WAIT_TIME,
+                        sinkSegmentId.toString(),
+                        cacheHit
+                    ).withWaitMeasuredFromNow();
 
                     // Emit CPU time metrics.
                     runner = CPUTimeMetricQueryRunner.safeBuild(
@@ -376,7 +349,7 @@ public class SinkQuerySegmentWalker implements QuerySegmentWalker
       return new ResourceIdPopulatingQueryRunner<>(
           QueryRunnerHelper.makeClosingQueryRunner(
               CPUTimeMetricQueryRunner.safeBuild(
-                  new SinkMetricsEmittingQueryRunner<>(
+                  new MetricsEmittingSegmentQueryRunner<>(
                       emitter,
                       toolChest,
                       new FinalizeResultsQueryRunner<>(
@@ -456,152 +429,6 @@ public class SinkQuerySegmentWalker implements QuerySegmentWalker
     // from full segment [foo_x_y_z partition 1], and is therefore useful if we ever want the cache to mix full segments
     // with subsegments (hydrants).
     return segmentId + "_H" + hydrantNumber;
-  }
-
-  /**
-   * This class is responsible for emitting query/segment/time, query/wait/time and query/segmentAndCache/Time metrics for a Sink.
-   * It accumulates query/segment/time and query/segmentAndCache/time metric for each FireHydrant at the level of Sink.
-   * query/wait/time metric is the time taken to process the first FireHydrant for the Sink.
-   * <p>
-   * This class operates in two distinct modes based on whether {@link SinkMetricsEmittingQueryRunner#segmentId} is null or non-null.
-   * When segmentId is non-null, it accumulates the metrics. When segmentId is null, it emits the accumulated metrics.
-   * <p>
-   * This class is derived from {@link org.apache.druid.query.MetricsEmittingQueryRunner}.
-   */
-  private static class SinkMetricsEmittingQueryRunner<T> implements QueryRunner<T>
-  {
-    private final ServiceEmitter emitter;
-    private final QueryToolChest<T, ? extends Query<T>> queryToolChest;
-    private final QueryRunner<T> queryRunner;
-    private final ConcurrentHashMap<String, SegmentMetrics> segmentMetricsAccumulator;
-    private final Set<String> metricsToCompute;
-    @Nullable
-    private final String segmentId;
-    private final long creationTimeNs;
-
-    private SinkMetricsEmittingQueryRunner(
-        ServiceEmitter emitter,
-        QueryToolChest<T, ? extends Query<T>> queryToolChest,
-        QueryRunner<T> queryRunner,
-        ConcurrentHashMap<String, SegmentMetrics> segmentMetricsAccumulator,
-        Set<String> metricsToCompute,
-        @Nullable String segmentId
-    )
-    {
-      this.emitter = emitter;
-      this.queryToolChest = queryToolChest;
-      this.queryRunner = queryRunner;
-      this.segmentMetricsAccumulator = segmentMetricsAccumulator;
-      this.metricsToCompute = metricsToCompute;
-      this.segmentId = segmentId;
-      this.creationTimeNs = System.nanoTime();
-    }
-
-    @Override
-    public Sequence<T> run(final QueryPlus<T> queryPlus, final ResponseContext responseContext)
-    {
-      QueryPlus<T> queryWithMetrics = queryPlus.withQueryMetrics(queryToolChest);
-      return Sequences.wrap(
-          // Use LazySequence because we want to account execution time of queryRunner.run() (it prepares the underlying
-          // Sequence) as part of the reported query time, i.e. we want to execute queryRunner.run() after
-          // `startTimeNs = System.nanoTime();`
-          new LazySequence<>(() -> queryRunner.run(queryWithMetrics, responseContext)),
-          new SequenceWrapper()
-          {
-            private long startTimeNs;
-
-            @Override
-            public void before()
-            {
-              startTimeNs = System.nanoTime();
-            }
-
-            @Override
-            public void after(boolean isDone, Throwable thrown)
-            {
-              if (segmentId != null) {
-                // accumulate metrics
-                final SegmentMetrics metrics = segmentMetricsAccumulator.computeIfAbsent(segmentId, id -> new SegmentMetrics());
-                if (metricsToCompute.contains(DefaultQueryMetrics.QUERY_WAIT_TIME)) {
-                  metrics.setWaitTime(startTimeNs - creationTimeNs);
-                }
-                if (metricsToCompute.contains(DefaultQueryMetrics.QUERY_SEGMENT_TIME)) {
-                  metrics.addSegmentTime(System.nanoTime() - startTimeNs);
-                }
-                if (metricsToCompute.contains(DefaultQueryMetrics.QUERY_SEGMENT_AND_CACHE_TIME)) {
-                  metrics.addSegmentAndCacheTime(System.nanoTime() - startTimeNs);
-                }
-              } else {
-                final QueryMetrics<?> queryMetrics = queryWithMetrics.getQueryMetrics();
-                // report accumulated metrics
-                for (Map.Entry<String, SegmentMetrics> segmentAndMetrics : segmentMetricsAccumulator.entrySet()) {
-                  queryMetrics.segment(segmentAndMetrics.getKey());
-
-                  for (Map.Entry<String, ObjLongConsumer<? super QueryMetrics<?>>> reportMetric : METRICS_TO_REPORT.entrySet()) {
-                    final String metricName = reportMetric.getKey();
-                    switch (metricName) {
-                      case DefaultQueryMetrics.QUERY_SEGMENT_TIME:
-                        reportMetric.getValue().accept(queryMetrics, segmentAndMetrics.getValue().getSegmentTime());
-                      case DefaultQueryMetrics.QUERY_WAIT_TIME:
-                        reportMetric.getValue().accept(queryMetrics, segmentAndMetrics.getValue().getWaitTime());
-                      case DefaultQueryMetrics.QUERY_SEGMENT_AND_CACHE_TIME:
-                        reportMetric.getValue().accept(queryMetrics, segmentAndMetrics.getValue().getSegmentAndCacheTime());
-                    }
-                  }
-
-                  try {
-                    queryMetrics.emit(emitter);
-                  }
-                  catch (Exception e) {
-                    // Query should not fail, because of emitter failure. Swallowing the exception.
-                    log.error(e, "Failed to emit metrics for segment[%s]", segmentAndMetrics.getKey());
-                  }
-                }
-              }
-            }
-          }
-      );
-    }
-
-    /**
-     * Class to track segment related metrics during query execution.
-     */
-    private static class SegmentMetrics
-    {
-      private final AtomicLong querySegmentTime = new AtomicLong(0);
-      private final AtomicLong queryWaitTime = new AtomicLong(0);
-      private final AtomicLong querySegmentAndCacheTime = new AtomicLong(0);
-
-      private void addSegmentTime(long time)
-      {
-        querySegmentTime.addAndGet(time);
-      }
-
-      private void setWaitTime(long time)
-      {
-        queryWaitTime.set(time);
-      }
-
-      private void addSegmentAndCacheTime(long time)
-      {
-        querySegmentAndCacheTime.addAndGet(time);
-      }
-
-      private long getSegmentTime()
-      {
-        return querySegmentTime.get();
-      }
-
-      private long getWaitTime()
-      {
-        return queryWaitTime.get();
-      }
-
-      private long getSegmentAndCacheTime()
-      {
-        return querySegmentAndCacheTime.get();
-      }
-    }
   }
 
   private static class SinkHolder implements Overshadowable<SinkHolder>

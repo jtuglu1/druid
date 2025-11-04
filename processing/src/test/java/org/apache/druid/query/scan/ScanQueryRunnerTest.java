@@ -39,7 +39,7 @@ import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.query.DefaultGenericQueryMetricsFactory;
 import org.apache.druid.query.DirectQueryProcessingPool;
 import org.apache.druid.query.Druids;
-import org.apache.druid.query.MetricsEmittingQueryRunner;
+import org.apache.druid.query.MetricsEmittingSegmentQueryRunner;
 import org.apache.druid.query.Order;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
@@ -206,15 +206,15 @@ public class ScanQueryRunnerTest extends InitializedNullHandlingTest
         .build();
 
     StubServiceEmitter stubServiceEmitter = new StubServiceEmitter("", "");
-    MetricsEmittingQueryRunner<ScanResultValue> metricsEmittingQueryRunner =
-        new MetricsEmittingQueryRunner<ScanResultValue>(
+    MetricsEmittingSegmentQueryRunner<ScanResultValue> metricsEmittingSegmentQueryRunner =
+        new MetricsEmittingSegmentQueryRunner<ScanResultValue>(
             stubServiceEmitter,
             TOOL_CHEST,
             runner,
             (obj, lng) -> {},
             (metrics) -> {}
         ).withWaitMeasuredFromNow();
-    Iterable<ScanResultValue> results = metricsEmittingQueryRunner.run(QueryPlus.wrap(query)).toList();
+    Iterable<ScanResultValue> results = metricsEmittingSegmentQueryRunner.run(QueryPlus.wrap(query)).toList();
 
     List<ScanResultValue> expectedResults = toExpected(
         toFullEvents(V_0112_0114),

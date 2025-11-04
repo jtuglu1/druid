@@ -158,6 +158,12 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   }
 
   @Override
+  public void segmentCacheHit(boolean hit)
+  {
+    delegateQueryMetrics.segmentCacheHit(hit);
+  }
+
+  @Override
   public void projection(String projection)
   {
     delegateQueryMetrics.projection(projection);
@@ -215,12 +221,6 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   public QueryMetrics reportSegmentTime(long timeNs)
   {
     return delegateQueryMetrics.reportSegmentTime(timeNs);
-  }
-
-  @Override
-  public QueryMetrics reportSegmentAndCacheTime(long timeNs)
-  {
-    return delegateQueryMetrics.reportSegmentAndCacheTime(timeNs);
   }
 
   @Override

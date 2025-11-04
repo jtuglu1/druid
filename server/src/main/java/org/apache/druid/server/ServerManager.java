@@ -41,7 +41,7 @@ import org.apache.druid.query.CPUTimeMetricQueryRunner;
 import org.apache.druid.query.DataSegmentAndDescriptor;
 import org.apache.druid.query.DataSource;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
-import org.apache.druid.query.MetricsEmittingQueryRunner;
+import org.apache.druid.query.MetricsEmittingSegmentQueryRunner;
 import org.apache.druid.query.NoopQueryRunner;
 import org.apache.druid.query.PerSegmentOptimizingQueryRunner;
 import org.apache.druid.query.PerSegmentQueryOptimizationContext;
@@ -85,6 +85,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -478,12 +479,17 @@ public class ServerManager implements QuerySegmentWalker
     final String segmentIdString = segmentId.toString();
 
     final SpecificSegmentSpec segmentSpec = new SpecificSegmentSpec(segmentDescriptor);
-    final MetricsEmittingQueryRunner<T> metricsEmittingQueryRunnerInner = new MetricsEmittingQueryRunner<>(
+    
+    // AtomicBoolean to track whether the cache was hit for this segment query
+    final AtomicBoolean cacheHit = new AtomicBoolean(false);
+    
+    final MetricsEmittingSegmentQueryRunner<T> metricsEmittingSegmentQueryRunnerInner = new MetricsEmittingSegmentQueryRunner<>(
         emitter,
         toolChest,
         factory.createRunner(segment),
-        QueryMetrics::reportSegmentTime,
-        queryMetrics -> queryMetrics.segment(segmentIdString)
+        MetricsEmittingSegmentQueryRunner.METRICS_SEGMENT_TIME,
+        segmentIdString,
+        cacheHit
     );
 
     final TimeBoundaryInspector timeBoundaryInspector = segment.as(TimeBoundaryInspector.class);
@@ -498,9 +504,10 @@ public class ServerManager implements QuerySegmentWalker
         objectMapper,
         cache,
         toolChest,
-        metricsEmittingQueryRunnerInner,
+        metricsEmittingSegmentQueryRunnerInner,
         cachePopulator,
-        cacheConfig
+        cacheConfig,
+        cacheHit
     );
 
     final BySegmentQueryRunner<T> bySegmentQueryRunner = new BySegmentQueryRunner<>(
@@ -509,21 +516,23 @@ public class ServerManager implements QuerySegmentWalker
         cachingQueryRunner
     );
 
-    final MetricsEmittingQueryRunner<T> metricsEmittingQueryRunnerOuter = new MetricsEmittingQueryRunner<>(
-        emitter,
-        toolChest,
-        bySegmentQueryRunner,
-        QueryMetrics::reportSegmentAndCacheTime,
-        queryMetrics -> queryMetrics.segment(segmentIdString)
-    ).withWaitMeasuredFromNow();
-
     final SpecificSegmentQueryRunner<T> specificSegmentQueryRunner = new SpecificSegmentQueryRunner<>(
-        metricsEmittingQueryRunnerOuter,
+        bySegmentQueryRunner,
         segmentSpec
     );
 
-    final PerSegmentOptimizingQueryRunner<T> perSegmentOptimizingQueryRunner = new PerSegmentOptimizingQueryRunner<>(
+    // Wrap with wait time measurement
+    final MetricsEmittingSegmentQueryRunner<T> metricsEmittingSegmentQueryRunnerWithWait = new MetricsEmittingSegmentQueryRunner<>(
+        emitter,
+        toolChest,
         specificSegmentQueryRunner,
+        MetricsEmittingSegmentQueryRunner.METRICS_WAIT_TIME,
+        segmentIdString,
+        null // cacheHit already tracked by inner runner
+    ).withWaitMeasuredFromNow();
+
+    final PerSegmentOptimizingQueryRunner<T> perSegmentOptimizingQueryRunner = new PerSegmentOptimizingQueryRunner<>(
+        metricsEmittingSegmentQueryRunnerWithWait,
         new PerSegmentQueryOptimizationContext(segmentDescriptor)
     );
 

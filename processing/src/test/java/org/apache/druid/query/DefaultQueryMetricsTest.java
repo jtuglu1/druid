@@ -113,9 +113,6 @@ public class DefaultQueryMetricsTest extends InitializedNullHandlingTest
     queryMetrics.reportSegmentTime(3000001).emit(serviceEmitter);
     serviceEmitter.verifyValue("query/segment/time", 3L);
 
-    queryMetrics.reportSegmentAndCacheTime(4000001).emit(serviceEmitter);
-    serviceEmitter.verifyValue("query/segmentAndCache/time", 4L);
-
     // CPU time is measured in microseconds by default
     queryMetrics.reportCpuTime(6000001).emit(serviceEmitter);
     serviceEmitter.verifyValue("query/cpu/time", 6000L);

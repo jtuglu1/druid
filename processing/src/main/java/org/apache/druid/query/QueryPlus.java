@@ -91,7 +91,7 @@ public final class QueryPlus<T>
    * By convention, callers of {@code withQueryMetrics()} must also call .getQueryMetrics().emit() on the returned
    * QueryMetrics object, regardless if this object is the same as the object on which .withQueryMetrics() was initially
    * called (i. e. it already had non-null QueryMetrics), or if it is a new QueryPlus object. See {@link
-   * MetricsEmittingQueryRunner} for example.
+   * MetricsEmittingSegmentQueryRunner} for example.
    */
   public QueryPlus<T> withQueryMetrics(QueryToolChest<T, ? extends Query<T>> queryToolChest)
   {

@@ -24,7 +24,7 @@ import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
-import org.apache.druid.query.MetricsEmittingQueryRunner;
+import org.apache.druid.query.MetricsEmittingSegmentQueryRunner;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
@@ -66,8 +66,8 @@ public class GroupByQueryRunnerTestHelper
       ServiceEmitter serviceEmitter
   )
   {
-    MetricsEmittingQueryRunner<ResultRow> metricsEmittingQueryRunner =
-        new MetricsEmittingQueryRunner<ResultRow>(
+    MetricsEmittingSegmentQueryRunner<ResultRow> metricsEmittingSegmentQueryRunner =
+        new MetricsEmittingSegmentQueryRunner<ResultRow>(
             serviceEmitter,
             factory.getToolchest(),
             runner,
@@ -76,7 +76,7 @@ public class GroupByQueryRunnerTestHelper
         ).withWaitMeasuredFromNow();
     QueryToolChest toolChest = factory.getToolchest();
     QueryRunner<T> theRunner = new FinalizeResultsQueryRunner<>(
-        toolChest.mergeResults(toolChest.preMergeQueryDecoration(metricsEmittingQueryRunner)),
+        toolChest.mergeResults(toolChest.preMergeQueryDecoration(metricsEmittingSegmentQueryRunner)),
         toolChest
     );
 

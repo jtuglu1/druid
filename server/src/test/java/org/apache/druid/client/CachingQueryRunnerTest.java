@@ -444,7 +444,6 @@ public class CachingQueryRunnerTest extends InitializedNullHandlingTest
             return true;
           }
         }
-
     );
   }
 
