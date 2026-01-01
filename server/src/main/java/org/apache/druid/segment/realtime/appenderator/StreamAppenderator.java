@@ -27,7 +27,6 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.FutureCallback;
@@ -39,7 +38,6 @@ import org.apache.commons.lang3.mutable.MutableLong;
 import org.apache.druid.client.cache.Cache;
 import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputRow;
-import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
@@ -349,38 +347,47 @@ public class StreamAppenderator implements Appenderator
     totalRows.addAndGet(numAddedRows);
 
     boolean isPersistRequired = false;
-    boolean persist = false;
-    List<String> persistReasons = new ArrayList<>();
 
-    if (!sink.canAppendRow()) {
-      persist = true;
-      persistReasons.add("No more rows can be appended to sink");
-    }
-    if (currTs > nextFlush) {
-      persist = true;
-      persistReasons.add(StringUtils.format(
-          "current time[%d] is greater than nextFlush[%d]",
-          currTs,
-          nextFlush
-      ));
-    }
-    if (rowsCurrentlyInMemory.get() >= tuningConfig.getMaxRowsInMemory()) {
-      persist = true;
-      persistReasons.add(StringUtils.format(
-          "rowsCurrentlyInMemory[%d] is greater than maxRowsInMemory[%d]",
-          rowsCurrentlyInMemory.get(),
-          tuningConfig.getMaxRowsInMemory()
-      ));
-    }
-    if (bytesCurrentlyInMemory.get() >= maxBytesTuningConfig) {
-      persist = true;
-      persistReasons.add(StringUtils.format(
-          "(estimated) bytesCurrentlyInMemory[%d] is greater than maxBytesInMemory[%d]",
-          bytesCurrentlyInMemory.get(),
-          maxBytesTuningConfig
-      ));
-    }
+    // Read atomic values once to avoid multiple volatile reads
+    final int currentRowsInMemory = rowsCurrentlyInMemory.get();
+    final long currentBytesInMemory = bytesCurrentlyInMemory.get();
+    final int maxRowsInMemory = tuningConfig.getMaxRowsInMemory();
+
+    // Check persist conditions without allocating ArrayList for reasons (common case: no persist needed)
+    final boolean cannotAppendMore = !sink.canAppendRow();
+    final boolean flushTimeExceeded = currTs > nextFlush;
+    final boolean rowLimitExceeded = currentRowsInMemory >= maxRowsInMemory;
+    final boolean byteLimitExceeded = currentBytesInMemory >= maxBytesTuningConfig;
+
+    final boolean persist = cannotAppendMore || flushTimeExceeded || rowLimitExceeded || byteLimitExceeded;
+
     if (persist) {
+      // Only build persist reasons when we actually need to persist (and log)
+      List<String> persistReasons = new ArrayList<>(4);
+      if (cannotAppendMore) {
+        persistReasons.add("No more rows can be appended to sink");
+      }
+      if (flushTimeExceeded) {
+        persistReasons.add(StringUtils.format(
+            "current time[%d] is greater than nextFlush[%d]",
+            currTs,
+            nextFlush
+        ));
+      }
+      if (rowLimitExceeded) {
+        persistReasons.add(StringUtils.format(
+            "rowsCurrentlyInMemory[%d] is greater than maxRowsInMemory[%d]",
+            currentRowsInMemory,
+            maxRowsInMemory
+        ));
+      }
+      if (byteLimitExceeded) {
+        persistReasons.add(StringUtils.format(
+            "(estimated) bytesCurrentlyInMemory[%d] is greater than maxBytesInMemory[%d]",
+            currentBytesInMemory,
+            maxBytesTuningConfig
+        ));
+      }
       if (allowIncrementalPersists) {
         // persistAll clears rowsCurrentlyInMemory, no need to update it.
         log.info("Flushing in-memory data to disk because %s.", String.join(",", persistReasons));
@@ -506,34 +513,64 @@ public class StreamAppenderator implements Appenderator
 
   private Sink getOrCreateSink(final SegmentIdWithShardSpec identifier)
   {
-    Sink retVal = sinks.get(identifier);
-
-    if (retVal == null) {
-      retVal = new Sink(
-          identifier.getInterval(),
-          schema,
-          identifier.getShardSpec(),
-          identifier.getVersion(),
-          tuningConfig.getAppendableIndexSpec(),
-          tuningConfig.getMaxRowsInMemory(),
-          maxBytesTuningConfig
-      );
-      bytesCurrentlyInMemory.addAndGet(calculateSinkMemoryInUsed(retVal));
-
-      // Add sink prior to announcing it, to ensure it is immediately queryable.
-      addSink(identifier, retVal);
-
-      try {
-        segmentAnnouncer.announceSegment(retVal.getSegment());
-      }
-      catch (IOException e) {
-        log.makeAlert(e, "Failed to announce new segment[%s]", schema.getDataSource())
-           .addData("interval", retVal.getInterval())
-           .emit();
-      }
+    // Fast path: check if sink already exists (common case for high-throughput ingestion)
+    Sink existingSink = sinks.get(identifier);
+    if (existingSink != null) {
+      return existingSink;
     }
 
-    return retVal;
+    // Slow path: need to create a new sink
+    // Create the sink first, then use putIfAbsent to handle races atomically
+    final Sink newSink = new Sink(
+        identifier.getInterval(),
+        schema,
+        identifier.getShardSpec(),
+        identifier.getVersion(),
+        tuningConfig.getAppendableIndexSpec(),
+        tuningConfig.getMaxRowsInMemory(),
+        maxBytesTuningConfig
+    );
+
+    // Atomically add the sink - if another thread beat us, putIfAbsent returns their sink
+    existingSink = sinks.putIfAbsent(identifier, newSink);
+    if (existingSink != null) {
+      // Another thread created the sink first - close ours and use theirs
+      newSink.finishWriting();
+      return existingSink;
+    }
+
+    // We successfully added the new sink - now do the side effects
+    bytesCurrentlyInMemory.addAndGet(calculateSinkMemoryInUsed(newSink));
+
+    // Register the sink in supporting data structures
+    registerSinkInMaps(identifier, newSink);
+
+    try {
+      segmentAnnouncer.announceSegment(newSink.getSegment());
+    }
+    catch (IOException e) {
+      log.makeAlert(e, "Failed to announce new segment[%s]", schema.getDataSource())
+         .addData("interval", newSink.getInterval())
+         .emit();
+    }
+
+    return newSink;
+  }
+
+  /**
+   * Register a sink in the supporting data structures (separate from putting in sinks map).
+   * This is called after the sink is already in the sinks map.
+   */
+  private void registerSinkInMaps(SegmentIdWithShardSpec identifier, Sink sink)
+  {
+    // Associate the base segment of a sink with its string identifier
+    // Needed to get the base segment using upgradedFromSegmentId of a pending segment
+    idToPendingSegment.put(identifier.asSegmentId().toString(), identifier);
+
+    // The base segment is associated with itself in the maps to maintain all the upgraded ids of a sink.
+    baseSegmentToUpgradedSegments.computeIfAbsent(identifier, k -> ConcurrentHashMap.newKeySet()).add(identifier);
+
+    ((SinkQuerySegmentWalker) texasRanger).registerUpgradedPendingSegment(identifier, sink);
   }
 
   @Override
@@ -642,27 +679,39 @@ public class StreamAppenderator implements Appenderator
     MutableLong totalHydrantsCount = new MutableLong();
     MutableLong totalHydrantsPersisted = new MutableLong();
     final long totalSinks = sinks.size();
+    final boolean debugEnabled = log.isDebugEnabled();
     for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : sinks.entrySet()) {
       final SegmentIdWithShardSpec identifier = entry.getKey();
       final Sink sink = entry.getValue();
       if (sink == null) {
         throw new ISE("No sink for identifier: %s", identifier);
       }
-      final List<FireHydrant> hydrants = Lists.newArrayList(sink);
-      totalHydrantsCount.add(hydrants.size());
-      currentHydrants.put(identifier.toString(), hydrants.size());
+
+      // Count hydrants using Iterables.size() to avoid ArrayList allocation
+      // This is O(n) but avoids object allocation which is better for GC
+      final int hydrantCount = Iterables.size(sink);
+      totalHydrantsCount.add(hydrantCount);
+      currentHydrants.put(identifier.toString(), hydrantCount);
       numPersistedRows += sink.getNumRowsInMemory();
       bytesPersisted += sink.getBytesInMemory();
 
-      final int limit = sink.isWritable() ? hydrants.size() - 1 : hydrants.size();
+      // For writable sinks, exclude the last hydrant (the one currently being written to)
+      final int limit = sink.isWritable() ? hydrantCount - 1 : hydrantCount;
 
-      // gather hydrants that have not been persisted:
-      for (FireHydrant hydrant : hydrants.subList(0, limit)) {
+      // Gather hydrants that have not been persisted
+      int hydrantIndex = 0;
+      for (FireHydrant hydrant : sink) {
+        if (hydrantIndex >= limit) {
+          break;
+        }
         if (!hydrant.hasSwapped()) {
-          log.debug("Hydrant[%s] hasn't persisted yet, persisting. Segment[%s]", hydrant, identifier);
+          if (debugEnabled) {
+            log.debug("Hydrant[%s] hasn't persisted yet, persisting. Segment[%s]", hydrant, identifier);
+          }
           indexesToPersist.add(Pair.of(hydrant, identifier));
           totalHydrantsPersisted.add(1);
         }
+        hydrantIndex++;
       }
 
       if (sink.swappable()) {
@@ -691,20 +740,22 @@ public class StreamAppenderator implements Appenderator
               }
 
               if (committer != null) {
-                log.debug(
-                    "Committing metadata[%s] for sinks[%s].",
-                    commitMetadata,
-                    Joiner.on(", ").join(
-                        currentHydrants.entrySet()
-                                       .stream()
-                                       .map(entry -> StringUtils.format(
-                                           "%s:%d",
-                                           entry.getKey(),
-                                           entry.getValue()
-                                       ))
-                                       .collect(Collectors.toList())
-                    )
-                );
+                if (log.isDebugEnabled()) {
+                  log.debug(
+                      "Committing metadata[%s] for sinks[%s].",
+                      commitMetadata,
+                      Joiner.on(", ").join(
+                          currentHydrants.entrySet()
+                                         .stream()
+                                         .map(entry -> StringUtils.format(
+                                             "%s:%d",
+                                             entry.getKey(),
+                                             entry.getValue()
+                                         ))
+                                         .collect(Collectors.toList())
+                      )
+                  );
+                }
 
                 committer.run();
 
@@ -1287,7 +1338,8 @@ public class StreamAppenderator implements Appenderator
 
   private void resetNextFlush()
   {
-    nextFlush = DateTimes.nowUtc().plus(tuningConfig.getIntermediatePersistPeriod()).getMillis();
+    // Use millisecond arithmetic directly to avoid DateTime object allocation
+    nextFlush = System.currentTimeMillis() + tuningConfig.getIntermediatePersistPeriod().getMillis();
   }
 
   /**
@@ -1435,7 +1487,8 @@ public class StreamAppenderator implements Appenderator
   }
 
   /**
-   * Update the state of the appenderator when adding a sink.
+   * Update the state of the appenderator when adding a sink during bootstrap.
+   * This is only called from bootstrapSinksFromDisk which runs single-threaded during startup.
    *
    * @param identifier sink identifier
    * @param sink       sink to be added
@@ -1443,15 +1496,7 @@ public class StreamAppenderator implements Appenderator
   private void addSink(SegmentIdWithShardSpec identifier, Sink sink)
   {
     sinks.put(identifier, sink);
-    // Asoociate the base segment of a sink with its string identifier
-    // Needed to get the base segment using upgradedFromSegmentId of a pending segment
-    idToPendingSegment.put(identifier.asSegmentId().toString(), identifier);
-
-    // The base segment is associated with itself in the maps to maintain all the upgraded ids of a sink.
-    baseSegmentToUpgradedSegments.put(identifier, new HashSet<>());
-    baseSegmentToUpgradedSegments.get(identifier).add(identifier);
-
-    ((SinkQuerySegmentWalker) texasRanger).registerUpgradedPendingSegment(identifier, sink);
+    registerSinkInMaps(identifier, sink);
   }
 
   private ListenableFuture<?> abandonSegment(
