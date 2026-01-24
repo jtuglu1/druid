@@ -22,6 +22,7 @@ package org.apache.druid.iceberg.input;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import org.apache.druid.auth.TaskAuthContext;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowListPlusRawValues;
@@ -192,6 +193,20 @@ public class IcebergInputSource implements SplittableInputSource<List<String>>
   public SplittableInputSource getDelegateInputSource()
   {
     return delegateInputSource;
+  }
+
+  /**
+   * Sets the task auth context for accessing the Iceberg catalog with user credentials.
+   * If the catalog is a {@link RestIcebergCatalog}, the credentials will be passed to it
+   * for authentication with the REST catalog server.
+   *
+   * @param taskAuthContext the auth context containing credentials, may be null
+   */
+  public void setTaskAuthContext(@Nullable TaskAuthContext taskAuthContext)
+  {
+    if (icebergCatalog instanceof RestIcebergCatalog) {
+      ((RestIcebergCatalog) icebergCatalog).setTaskAuthContext(taskAuthContext);
+    }
   }
 
   protected void retrieveIcebergDatafiles()

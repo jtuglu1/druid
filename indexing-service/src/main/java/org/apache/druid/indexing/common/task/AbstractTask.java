@@ -24,6 +24,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
+import org.apache.druid.auth.TaskAuthContext;
 import org.apache.druid.common.utils.IdUtils;
 import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskStatus;
@@ -97,6 +98,13 @@ public abstract class AbstractTask implements Task
   private final String dataSource;
 
   private final Map<String, Object> context;
+
+  /**
+   * Task auth context for accessing external services that require user credentials.
+   * Transient - not serialized to metadata storage, in-memory only.
+   */
+  @JsonIgnore
+  private transient TaskAuthContext taskAuthContext;
 
   private File reportsFile;
   private File statusFile;
@@ -294,6 +302,19 @@ public abstract class AbstractTask implements Task
   public String getDataSource()
   {
     return dataSource;
+  }
+
+  @Override
+  @Nullable
+  public TaskAuthContext getTaskAuthContext()
+  {
+    return taskAuthContext;
+  }
+
+  @Override
+  public void setTaskAuthContext(@Nullable TaskAuthContext authContext)
+  {
+    this.taskAuthContext = authContext;
   }
 
   @Override

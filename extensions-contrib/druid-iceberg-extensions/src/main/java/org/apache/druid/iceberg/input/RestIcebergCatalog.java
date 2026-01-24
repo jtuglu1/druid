@@ -21,8 +21,10 @@ package org.apache.druid.iceberg.input;
 
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.druid.auth.TaskAuthContext;
 import org.apache.druid.error.InvalidInput;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.iceberg.guice.HiveConf;
@@ -31,14 +33,22 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.SessionCatalog;
-import org.apache.iceberg.rest.HTTPClient;
-import org.apache.iceberg.rest.RESTCatalog;
+import org.apache.iceberg.rest.RESTSessionCatalog;
 
 import javax.annotation.Nullable;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Catalog implementation for Iceberg REST catalogs.
+ * Uses {@link RESTSessionCatalog} to support session-based authentication where
+ * credentials can be passed per-request via {@link SessionCatalog.SessionContext}.
+ *
+ * <p>The session context is built from {@link TaskAuthContext} if available, allowing
+ * user credentials (e.g., OAuth tokens) to be passed to the REST catalog for
+ * authentication and credential vending.
  */
 public class RestIcebergCatalog extends IcebergCatalog
 {
@@ -52,7 +62,14 @@ public class RestIcebergCatalog extends IcebergCatalog
 
   private final Configuration configuration;
 
-  private Catalog restCatalog;
+  /**
+   * Task auth context for accessing the REST catalog with user credentials.
+   * Transient - not serialized, set programmatically during task execution.
+   */
+  @JsonIgnore
+  private transient TaskAuthContext taskAuthContext;
+
+  private RESTSessionCatalog restSessionCatalog;
 
   @JsonCreator
   public RestIcebergCatalog(
@@ -75,13 +92,15 @@ public class RestIcebergCatalog extends IcebergCatalog
     this.configuration = configuration;
   }
 
+  /**
+   * Returns a Catalog instance that uses the current session context for all operations.
+   * The returned Catalog wraps the underlying RESTSessionCatalog and passes session
+   * credentials to all catalog operations (listTables, loadTable, etc.).
+   */
   @Override
   public Catalog retrieveCatalog()
   {
-    if (restCatalog == null) {
-      restCatalog = setupCatalog();
-    }
-    return restCatalog;
+    return getOrCreateSessionCatalog().asCatalog(buildSessionContext());
   }
 
   public String getCatalogUri()
@@ -94,15 +113,53 @@ public class RestIcebergCatalog extends IcebergCatalog
     return catalogProperties;
   }
 
-  private RESTCatalog setupCatalog()
+  /**
+   * Sets the task auth context for accessing the REST catalog with user credentials.
+   * When set, the credentials will be used to create a SessionContext for authentication.
+   *
+   * @param taskAuthContext the auth context containing credentials, may be null
+   */
+  public void setTaskAuthContext(@Nullable TaskAuthContext taskAuthContext)
   {
-    RESTCatalog restCatalog = new RESTCatalog(
-        SessionCatalog.SessionContext.createEmpty(),
-        config -> HTTPClient.builder(config).uri(config.get(CatalogProperties.URI)).build()
-    );
-    restCatalog.setConf(configuration);
-    catalogProperties.put(CatalogProperties.URI, catalogUri);
-    restCatalog.initialize("rest", catalogProperties);
-    return restCatalog;
+    this.taskAuthContext = taskAuthContext;
+  }
+
+  private RESTSessionCatalog getOrCreateSessionCatalog()
+  {
+    if (restSessionCatalog == null) {
+      restSessionCatalog = setupCatalog();
+    }
+    return restSessionCatalog;
+  }
+
+  private RESTSessionCatalog setupCatalog()
+  {
+    RESTSessionCatalog catalog = new RESTSessionCatalog();
+    catalog.setConf(configuration);
+    Map<String, String> props = new HashMap<>(catalogProperties);
+    props.put(CatalogProperties.URI, catalogUri);
+    catalog.initialize("rest", props);
+    return catalog;
+  }
+
+  /**
+   * Builds a SessionContext for the REST catalog. If a TaskAuthContext is available with credentials,
+   * they will be included in the session context for authentication with the REST catalog server.
+   *
+   * @return a SessionContext, either with credentials or empty
+   */
+  private SessionCatalog.SessionContext buildSessionContext()
+  {
+    if (taskAuthContext != null && taskAuthContext.getCredentials() != null && !taskAuthContext.getCredentials().isEmpty()) {
+      // Create session context with credentials
+      // Constructor: (sessionId, identity, credentials, properties)
+      return new SessionCatalog.SessionContext(
+          UUID.randomUUID().toString(),
+          taskAuthContext.getIdentity(),
+          taskAuthContext.getCredentials(),
+          Collections.emptyMap()
+      );
+    }
+    return SessionCatalog.SessionContext.createEmpty();
   }
 }
