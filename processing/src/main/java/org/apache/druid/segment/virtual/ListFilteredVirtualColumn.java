@@ -168,16 +168,28 @@ public class ListFilteredVirtualColumn implements VirtualColumn
   @Override
   public ColumnCapabilities capabilities(String columnName)
   {
+    // The output of list filtering is effectively single-valued for grouping purposes.
+    // When used in GROUP BY, each row produces at most one value from the filtered set,
+    // or null if no values match the filter.
     return new ColumnCapabilitiesImpl().setType(delegate.getOutputType())
                                        .setDictionaryEncoded(true)
-                                       .setHasBitmapIndexes(true);
+                                       .setHasBitmapIndexes(true)
+                                       .setHasMultipleValues(false);
   }
 
   @Nullable
   @Override
   public ColumnCapabilities capabilities(ColumnInspector inspector, String columnName)
   {
-    return inspector.getColumnCapabilities(delegate.getDimension());
+    ColumnCapabilities underlyingCapabilities = inspector.getColumnCapabilities(delegate.getDimension());
+    if (underlyingCapabilities == null) {
+      return null;
+    }
+    // The output of list filtering is effectively single-valued for grouping purposes.
+    // When used in GROUP BY, each row produces at most one value from the filtered set,
+    // or null if no values match the filter.
+    return ColumnCapabilitiesImpl.copyOf(underlyingCapabilities)
+                                 .setHasMultipleValues(false);
   }
 
   @Override

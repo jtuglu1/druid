@@ -24,7 +24,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableSet;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
 import org.apache.druid.segment.column.ColumnType;
 import org.junit.Assert;
 import org.junit.Test;
@@ -65,5 +68,73 @@ public class ListFilteredVirtualColumnTest
   public void testEqualsAndHashcode()
   {
     EqualsVerifier.forClass(ListFilteredVirtualColumn.class).usingGetClass().verify();
+  }
+
+  @Test
+  public void testCapabilitiesWithoutInspector()
+  {
+    ListFilteredVirtualColumn virtualColumn = new ListFilteredVirtualColumn(
+        "filtered",
+        new DefaultDimensionSpec("column", "output", ColumnType.STRING),
+        ImmutableSet.of("a", "b"),
+        true
+    );
+
+    ColumnCapabilities capabilities = virtualColumn.capabilities("filtered");
+    Assert.assertNotNull(capabilities);
+    Assert.assertEquals(ColumnType.STRING, capabilities.toColumnType());
+    Assert.assertTrue(capabilities.isDictionaryEncoded().isTrue());
+    Assert.assertTrue(capabilities.hasBitmapIndexes());
+    // After list filtering, the output is single-valued for grouping purposes.
+    Assert.assertTrue(capabilities.hasMultipleValues().isFalse());
+  }
+
+  @Test
+  public void testCapabilitiesWithInspector()
+  {
+    ListFilteredVirtualColumn virtualColumn = new ListFilteredVirtualColumn(
+        "filtered",
+        new DefaultDimensionSpec("column", "output", ColumnType.STRING),
+        ImmutableSet.of("a", "b"),
+        true
+    );
+
+    // Create an inspector that returns multi-valued capabilities for the underlying column
+    ColumnInspector inspector = columnName -> {
+      if ("column".equals(columnName)) {
+        return new ColumnCapabilitiesImpl()
+            .setType(ColumnType.STRING)
+            .setDictionaryEncoded(true)
+            .setHasBitmapIndexes(true)
+            .setHasMultipleValues(true);
+      }
+      return null;
+    };
+
+    ColumnCapabilities capabilities = virtualColumn.capabilities(inspector, "filtered");
+    Assert.assertNotNull(capabilities);
+    Assert.assertEquals(ColumnType.STRING, capabilities.toColumnType());
+    Assert.assertTrue(capabilities.isDictionaryEncoded().isTrue());
+    Assert.assertTrue(capabilities.hasBitmapIndexes());
+    // Even though the underlying column has multiple values, after filtering
+    // the output is single-valued for grouping purposes.
+    Assert.assertTrue(capabilities.hasMultipleValues().isFalse());
+  }
+
+  @Test
+  public void testCapabilitiesWithInspectorNullUnderlying()
+  {
+    ListFilteredVirtualColumn virtualColumn = new ListFilteredVirtualColumn(
+        "filtered",
+        new DefaultDimensionSpec("nonexistent", "output", ColumnType.STRING),
+        ImmutableSet.of("a", "b"),
+        true
+    );
+
+    // Inspector returns null for non-existent column
+    ColumnInspector inspector = columnName -> null;
+
+    ColumnCapabilities capabilities = virtualColumn.capabilities(inspector, "filtered");
+    Assert.assertNull(capabilities);
   }
 }

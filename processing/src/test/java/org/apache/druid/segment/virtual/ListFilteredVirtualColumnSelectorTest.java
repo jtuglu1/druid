@@ -290,7 +290,9 @@ public class ListFilteredVirtualColumnSelectorTest extends InitializedNullHandli
     ColumnCapabilities capabilities = selectorFactory.getColumnCapabilities(columnName);
     Assert.assertNotNull(capabilities);
     Assert.assertEquals(ValueType.STRING, capabilities.getType());
-    Assert.assertTrue(capabilities.hasMultipleValues().isMaybeTrue());
+    // ListFilteredVirtualColumn reports hasMultipleValues=false because after filtering,
+    // each row produces at most one value for grouping purposes (or null if no match).
+    Assert.assertTrue(capabilities.hasMultipleValues().isFalse());
   }
 
   private VirtualizedColumnSelectorFactory makeSelectorFactory(ListFilteredVirtualColumn virtualColumn)
