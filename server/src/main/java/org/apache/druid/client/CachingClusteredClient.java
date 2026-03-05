@@ -67,6 +67,7 @@ import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.QueryToolChest;
+import org.apache.druid.query.QueryUnavailableException;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.SegmentDescriptor;
 import org.apache.druid.query.aggregation.MetricManipulatorFns;
@@ -127,6 +128,8 @@ public class CachingClusteredClient implements QuerySegmentWalker
   private final ForkJoinPool pool;
   private final QueryScheduler scheduler;
   private final ServiceEmitter emitter;
+  private final BrokerSegmentUnavailabilityConfig unavailabilityConfig;
+  private final BrokerSegmentUsedStateWatcher segmentUsedStateWatcher;
 
   @Inject
   public CachingClusteredClient(
@@ -140,7 +143,9 @@ public class CachingClusteredClient implements QuerySegmentWalker
       BrokerParallelMergeConfig parallelMergeConfig,
       @Merging ForkJoinPool pool,
       QueryScheduler scheduler,
-      ServiceEmitter emitter
+      ServiceEmitter emitter,
+      BrokerSegmentUnavailabilityConfig unavailabilityConfig,
+      BrokerSegmentUsedStateWatcher segmentUsedStateWatcher
   )
   {
     this.conglomerate = conglomerate;
@@ -154,6 +159,8 @@ public class CachingClusteredClient implements QuerySegmentWalker
     this.pool = pool;
     this.scheduler = scheduler;
     this.emitter = emitter;
+    this.unavailabilityConfig = unavailabilityConfig;
+    this.segmentUsedStateWatcher = segmentUsedStateWatcher;
 
     if (cacheConfig.isQueryCacheable(Query.GROUP_BY) && (cacheConfig.isUseCache() || cacheConfig.isPopulateCache())) {
       log.warn(
@@ -598,6 +605,20 @@ public class CachingClusteredClient implements QuerySegmentWalker
                                                                        .pick(query, cloneQueryMode);
 
         if (queryableDruidServer == null) {
+          final ServerSelector selector = segmentServer.getServer();
+          final SegmentId segmentId = selector != null ? selector.getSegment().getId() : null;
+          if (unavailabilityConfig.isEnabled()
+              && unavailabilityConfig.isFailOnUnavailable()
+              && segmentId != null
+              && segmentUsedStateWatcher.isUsed(segmentId)) {
+            throw new QueryUnavailableException(
+                StringUtils.format(
+                    "Segment[%s] for datasource[%s] is used but has no serving nodes.",
+                    segmentId,
+                    query.getDataSource()
+                )
+            );
+          }
           log.makeAlert(
               "No servers found for SegmentDescriptor[%s] for DataSource[%s]?! How can this be?!",
               segmentServer.getSegmentDescriptor(),

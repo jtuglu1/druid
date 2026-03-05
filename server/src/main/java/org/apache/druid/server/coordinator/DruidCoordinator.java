@@ -97,6 +97,9 @@ import org.apache.druid.server.coordinator.stats.Stats;
 import org.apache.druid.server.http.CoordinatorDynamicConfigSyncer;
 import org.apache.druid.server.http.SegmentsToUpdateFilter;
 import org.apache.druid.server.lookup.cache.LookupCoordinatorManager;
+import org.apache.druid.server.coordination.ChangeRequestHistory;
+import org.apache.druid.server.coordination.ChangeRequestsSnapshot;
+import org.apache.druid.server.coordination.SegmentUsedStateChangeRequest;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.SegmentId;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
@@ -106,6 +109,7 @@ import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -146,6 +150,19 @@ public class DruidCoordinator
   private final CloneStatusManager cloneStatusManager;
 
   private volatile boolean started = false;
+
+  /**
+   * History of segment used-state changes, used by the coordinator→broker
+   * delta-sync endpoint. Protected by {@link #segmentUsedStateLock}.
+   */
+  private final ChangeRequestHistory<SegmentUsedStateChangeRequest> segmentUsedStateHistory =
+      new ChangeRequestHistory<>();
+
+  /** Current set of used segment ID strings. Protected by {@link #segmentUsedStateLock}. */
+  @GuardedBy("segmentUsedStateLock")
+  private Set<String> currentUsedSegmentIds = Collections.emptySet();
+
+  private final Object segmentUsedStateLock = new Object();
 
   /**
    * Used to determine count of under-replicated or unavailable segments.
@@ -357,6 +374,34 @@ public class DruidCoordinator
     return coordLeaderSelector.getCurrentLeader();
   }
 
+  /**
+   * Returns a full snapshot of all currently used segment IDs together with the
+   * latest counter from the change history. Callers (e.g. the segment-used-state
+   * endpoint) use this to seed a client's counter on its very first request
+   * ({@code counter = -1}).
+   */
+  public ChangeRequestsSnapshot<SegmentUsedStateChangeRequest> getFullSegmentUsedStateSnapshot()
+  {
+    synchronized (segmentUsedStateLock) {
+      List<SegmentUsedStateChangeRequest> allUsed = new ArrayList<>(currentUsedSegmentIds.size());
+      for (String id : currentUsedSegmentIds) {
+        allUsed.add(new SegmentUsedStateChangeRequest(id, true));
+      }
+      return ChangeRequestsSnapshot.success(segmentUsedStateHistory.getLastCounter(), allUsed);
+    }
+  }
+
+  /**
+   * Returns delta changes since the given counter, long-polling up to the
+   * underlying history's timeout. Delegates to {@link ChangeRequestHistory}.
+   */
+  public com.google.common.util.concurrent.ListenableFuture<
+      ChangeRequestsSnapshot<SegmentUsedStateChangeRequest>>
+  getSegmentUsedStateDeltaSince(ChangeRequestHistory.Counter counter)
+  {
+    return segmentUsedStateHistory.getRequestsSince(counter);
+  }
+
   public List<DutyGroupStatus> getStatusOfDuties()
   {
     return dutiesRunnables.stream().map(r -> r.dutyGroup.getStatus()).collect(Collectors.toList());
@@ -536,6 +581,10 @@ public class DruidCoordinator
       lookupCoordinatorManager.stop();
       metadataManager.onLeaderStop();
       stopAllDutyGroups();
+      synchronized (segmentUsedStateLock) {
+        currentUsedSegmentIds = Collections.emptySet();
+      }
+      segmentUsedStateHistory.stop();
     }
   }
 
@@ -568,7 +617,8 @@ public class DruidCoordinator
         new MarkEternityTombstonesAsUnused(deleteSegments),
         new BalanceSegments(config.getCoordinatorPeriod()),
         new CloneHistoricals(loadQueueManager, cloneStatusManager),
-        new CollectLoadQueueStats()
+        new CollectLoadQueueStats(),
+        new PublishSegmentUsedStateChanges()
     );
   }
 
@@ -855,6 +905,44 @@ public class DruidCoordinator
       final RowKey.Builder builder = RowKey.with(Dimension.SERVER, serverName);
       dimensionValues.forEach(builder::with);
       return builder.build();
+    }
+  }
+
+  /**
+   * Diffs the current used-segment snapshot against the previous one and pushes
+   * any added/removed segments into {@link #segmentUsedStateHistory} so that
+   * brokers can pick them up via the delta-sync endpoint.
+   */
+  private class PublishSegmentUsedStateChanges implements CoordinatorDuty
+  {
+    @Override
+    public DruidCoordinatorRuntimeParams run(DruidCoordinatorRuntimeParams params)
+    {
+      final Set<String> newIds = new HashSet<>();
+      for (var ds : params.getDataSourcesSnapshot().getDataSourcesWithAllUsedSegments()) {
+        for (DataSegment segment : ds.getSegments()) {
+          newIds.add(segment.getId().toString());
+        }
+      }
+
+      synchronized (segmentUsedStateLock) {
+        final List<SegmentUsedStateChangeRequest> changes = new ArrayList<>();
+        for (String id : newIds) {
+          if (!currentUsedSegmentIds.contains(id)) {
+            changes.add(new SegmentUsedStateChangeRequest(id, true));
+          }
+        }
+        for (String id : currentUsedSegmentIds) {
+          if (!newIds.contains(id)) {
+            changes.add(new SegmentUsedStateChangeRequest(id, false));
+          }
+        }
+        currentUsedSegmentIds = newIds;
+        if (!changes.isEmpty()) {
+          segmentUsedStateHistory.addChangeRequests(changes);
+        }
+      }
+      return params;
     }
   }
 }

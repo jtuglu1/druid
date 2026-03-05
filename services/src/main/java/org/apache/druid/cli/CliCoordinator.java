@@ -100,6 +100,7 @@ import org.apache.druid.server.http.RedirectFilter;
 import org.apache.druid.server.http.RedirectInfo;
 import org.apache.druid.server.http.RulesResource;
 import org.apache.druid.server.http.SelfDiscoveryResource;
+import org.apache.druid.server.http.SegmentUsedStateListerResource;
 import org.apache.druid.server.http.ServersResource;
 import org.apache.druid.server.http.TiersResource;
 import org.apache.druid.server.initialization.jetty.JettyServerInitializer;
@@ -239,6 +240,7 @@ public class CliCoordinator extends ServerRunnable
             Jerseys.addResource(binder, LookupCoordinatorResource.class);
             Jerseys.addResource(binder, ClusterResource.class);
             Jerseys.addResource(binder, HttpServerInventoryViewResource.class);
+            Jerseys.addResource(binder, SegmentUsedStateListerResource.class);
 
             LifecycleModule.register(binder, Server.class);
             LifecycleModule.register(binder, DataSourcesResource.class);

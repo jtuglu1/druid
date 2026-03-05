@@ -45,9 +45,11 @@ import org.apache.druid.timeline.partition.PartitionChunk;
 import javax.inject.Named;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
@@ -79,6 +81,15 @@ public class BrokerServerView implements TimelineServerView
   private final CountDownLatch initialized = new CountDownLatch(1);
   private final FilteredServerInventoryView baseView;
   private final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig;
+  private final BrokerSegmentUnavailabilityConfig unavailabilityConfig;
+  private final BrokerSegmentUsedStateWatcher segmentUsedStateWatcher;
+
+  /**
+   * Segments kept in the broker timeline even though no server currently serves them,
+   * because the coordinator still considers them "used". Queries to these segments will
+   * fail with {@link org.apache.druid.query.QueryUnavailableException}. Guarded by lock.
+   */
+  private final Set<SegmentId> retainedSegments = new HashSet<>();
 
   @Inject
   public BrokerServerView(
@@ -88,7 +99,9 @@ public class BrokerServerView implements TimelineServerView
       @Named(REALTIME_SELECTOR) final TierSelectorStrategy realtimeTierSelectorStrategy, // Injected from bindings set up in BrokerRealtimeSelectorModule
       final ServiceEmitter emitter,
       final BrokerSegmentWatcherConfig segmentWatcherConfig,
-      final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig
+      final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig,
+      final BrokerSegmentUnavailabilityConfig unavailabilityConfig,
+      final BrokerSegmentUsedStateWatcher segmentUsedStateWatcher
   )
   {
     this.druidClientFactory = directDruidClientFactory;
@@ -99,6 +112,11 @@ public class BrokerServerView implements TimelineServerView
 
     this.emitter = emitter;
     this.brokerViewOfCoordinatorConfig = brokerViewOfCoordinatorConfig;
+    this.unavailabilityConfig = unavailabilityConfig;
+    this.segmentUsedStateWatcher = segmentUsedStateWatcher;
+
+    // When coordinator marks segments unused, clean up any retained (server-less) entries.
+    segmentUsedStateWatcher.addUnusedSegmentListener(this::onSegmentsUnused);
 
     // Validate and set the segment watcher config
     validateSegmentWatcherConfig(segmentWatcherConfig);
@@ -306,6 +324,8 @@ public class BrokerServerView implements TimelineServerView
           }
         }
         selector.addServerAndUpdateSegment(queryableDruidServer, segment);
+        // Server is now serving the segment - clear any retained state.
+        retainedSegments.remove(segmentId);
       }
       // run the callbacks, even if the segment came from a broker, lets downstream watchers decide what to do with it
       runTimelineCallbacks(callback -> callback.segmentAdded(server, segment));
@@ -351,20 +371,66 @@ public class BrokerServerView implements TimelineServerView
       }
 
       if (selector.isEmpty()) {
-        VersionedIntervalTimeline<String, ServerSelector> timeline = timelines.get(segment.getDataSource());
-        selectors.remove(segmentId);
+        if (unavailabilityConfig.isEnabled() && segmentUsedStateWatcher.isUsed(segmentId)) {
+          // Coordinator still considers this segment used. Keep it in the timeline so
+          // that queries targeting it get a clear error (QueryUnavailableException) rather
+          // than silently returning partial results.
+          retainedSegments.add(segmentId);
+          log.info(
+              "Segment[%s] has no serving nodes but is still used. "
+              + "Retaining in timeline until coordinator marks it unused.",
+              segmentId
+          );
+        } else {
+          VersionedIntervalTimeline<String, ServerSelector> timeline = timelines.get(segment.getDataSource());
+          selectors.remove(segmentId);
 
+          final PartitionChunk<ServerSelector> removedPartition = timeline.remove(
+              segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(selector)
+          );
+
+          if (removedPartition == null) {
+            log.warn(
+                "Asked to remove timeline entry[interval: %s, version: %s] that doesn't exist",
+                segment.getInterval(),
+                segment.getVersion()
+            );
+          } else {
+            runTimelineCallbacks(callback -> callback.segmentRemoved(segment));
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Called by {@link BrokerSegmentUsedStateWatcher} when segments become unused in the coordinator.
+   * Any retained (server-less) entries for those segments are cleaned up.
+   */
+  private void onSegmentsUnused(Set<String> unusedSegmentIdStrings)
+  {
+    synchronized (lock) {
+      final Set<SegmentId> toRemove = new HashSet<>();
+      for (SegmentId retainedId : retainedSegments) {
+        if (unusedSegmentIdStrings.contains(retainedId.toString())) {
+          toRemove.add(retainedId);
+        }
+      }
+      for (SegmentId segmentId : toRemove) {
+        retainedSegments.remove(segmentId);
+        final ServerSelector selector = selectors.remove(segmentId);
+        if (selector == null) {
+          continue;
+        }
+        final DataSegment segment = selector.getSegment();
+        final VersionedIntervalTimeline<String, ServerSelector> timeline = timelines.get(segment.getDataSource());
+        if (timeline == null) {
+          continue;
+        }
         final PartitionChunk<ServerSelector> removedPartition = timeline.remove(
             segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(selector)
         );
-
-        if (removedPartition == null) {
-          log.warn(
-              "Asked to remove timeline entry[interval: %s, version: %s] that doesn't exist",
-              segment.getInterval(),
-              segment.getVersion()
-          );
-        } else {
+        if (removedPartition != null) {
           runTimelineCallbacks(callback -> callback.segmentRemoved(segment));
         }
       }

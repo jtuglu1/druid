@@ -26,6 +26,8 @@ import com.google.inject.Inject;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.name.Names;
+import org.apache.druid.client.BrokerSegmentUnavailabilityConfig;
+import org.apache.druid.client.BrokerSegmentUsedStateWatcher;
 import org.apache.druid.client.BrokerSegmentWatcherConfig;
 import org.apache.druid.client.BrokerServerView;
 import org.apache.druid.client.BrokerViewOfCoordinatorConfig;
@@ -160,6 +162,9 @@ public class CliBroker extends ServerRunnable
           JsonConfigProvider.bind(binder, "druid.broker.retryPolicy", RetryQueryRunnerConfig.class);
           JsonConfigProvider.bind(binder, "druid.broker.segment", BrokerSegmentWatcherConfig.class);
           JsonConfigProvider.bind(binder, "druid.broker.internal.query.config", InternalQueryConfig.class);
+          JsonConfigProvider.bind(binder, "druid.broker.unavailableSegments", BrokerSegmentUnavailabilityConfig.class);
+          binder.bind(BrokerSegmentUsedStateWatcher.class).in(LazySingleton.class);
+          LifecycleModule.register(binder, BrokerSegmentUsedStateWatcher.class);
 
           binder.bind(QuerySegmentWalker.class).to(ClientQuerySegmentWalker.class).in(LazySingleton.class);
           binder.bind(JettyServerInitializer.class).to(QueryJettyServerInitializer.class).in(LazySingleton.class);
