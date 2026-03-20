@@ -38,6 +38,15 @@ public interface Cache extends Closeable
   void put(NamedKey key, byte[] value);
 
   /**
+   * Stores a value with a per-entry TTL. Implementations that do not support per-entry TTL fall back to the
+   * two-arg {@link #put(NamedKey, byte[])}, ignoring the TTL.
+   */
+  default void put(NamedKey key, byte[] value, int ttlSeconds)
+  {
+    put(key, value);
+  }
+
+  /**
    * Resulting map should not contain any null values (i.e. cache misses should not be included)
    *
    * @param keys

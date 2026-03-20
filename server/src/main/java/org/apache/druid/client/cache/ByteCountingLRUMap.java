@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
 */
-class ByteCountingLRUMap extends LinkedHashMap<ByteBuffer, byte[]>
+class ByteCountingLRUMap extends LinkedHashMap<ByteBuffer, CachedEntry>
 {
   private static final Logger log = new Logger(ByteCountingLRUMap.class);
 
@@ -77,10 +77,10 @@ class ByteCountingLRUMap extends LinkedHashMap<ByteBuffer, byte[]>
   }
 
   @Override
-  public byte[] put(ByteBuffer key, byte[] value)
+  public CachedEntry put(ByteBuffer key, CachedEntry value)
   {
-    numBytes.addAndGet(key.remaining() + value.length);
-    Iterator<Map.Entry<ByteBuffer, byte[]>> it = entrySet().iterator();
+    numBytes.addAndGet(key.remaining() + value.data().length);
+    Iterator<Map.Entry<ByteBuffer, CachedEntry>> it = entrySet().iterator();
     List<ByteBuffer> keysToRemove = new ArrayList<>();
     long totalEvictionSize = 0L;
     while (numBytes.get() - totalEvictionSize > sizeInBytes && it.hasNext()) {
@@ -95,8 +95,8 @@ class ByteCountingLRUMap extends LinkedHashMap<ByteBuffer, byte[]>
         );
       }
 
-      Map.Entry<ByteBuffer, byte[]> next = it.next();
-      totalEvictionSize += next.getKey().remaining() + next.getValue().length;
+      Map.Entry<ByteBuffer, CachedEntry> next = it.next();
+      totalEvictionSize += next.getKey().remaining() + next.getValue().data().length;
       keysToRemove.add(next.getKey());
     }
 
@@ -104,19 +104,19 @@ class ByteCountingLRUMap extends LinkedHashMap<ByteBuffer, byte[]>
       remove(keyToRemove);
     }
 
-    byte[] old = super.put(key, value);
+    CachedEntry old = super.put(key, value);
     if (old != null) {
-      numBytes.addAndGet(-key.remaining() - old.length);
+      numBytes.addAndGet(-key.remaining() - old.data().length);
     }
     return old;
   }
 
   @Override
-  public byte[] remove(Object key)
+  public CachedEntry remove(Object key)
   {
-    byte[] value = super.remove(key);
+    CachedEntry value = super.remove(key);
     if (value != null) {
-      long delta = -((ByteBuffer) key).remaining() - value.length;
+      long delta = -((ByteBuffer) key).remaining() - value.data().length;
       numBytes.addAndGet(delta);
     }
     return value;

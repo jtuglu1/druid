@@ -92,6 +92,15 @@ public class HybridCache implements Cache
   }
 
   @Override
+  public void put(NamedKey key, byte[] value, int ttlSeconds)
+  {
+    level1.put(key, value, ttlSeconds);
+    if (config.getPopulateL2()) {
+      level2.put(key, value, ttlSeconds);
+    }
+  }
+
+  @Override
   public Map<NamedKey, byte[]> getBulk(Iterable<NamedKey> keys)
   {
     Set<NamedKey> remaining = Sets.newHashSet(keys);

@@ -42,7 +42,7 @@ public class MapCache implements Cache
     return new MapCache(new ByteCountingLRUMap(sizeInBytes));
   }
 
-  private final Map<ByteBuffer, byte[]> baseMap;
+  private final Map<ByteBuffer, CachedEntry> baseMap;
   private final ByteCountingLRUMap byteCountingLRUMap;
 
   private final Map<String, byte[]> namespaceId;
@@ -81,23 +81,43 @@ public class MapCache implements Cache
   @Override
   public byte[] get(NamedKey key)
   {
-    final byte[] retVal;
+    final ByteBuffer mapKey = computeKey(getNamespaceId(key.namespace), key.key);
+    final CachedEntry entry;
     synchronized (clearLock) {
-      retVal = baseMap.get(computeKey(getNamespaceId(key.namespace), key.key));
+      entry = baseMap.get(mapKey);
     }
-    if (retVal == null) {
+    if (entry == null) {
       missCount.incrementAndGet();
-    } else {
-      hitCount.incrementAndGet();
+      return null;
     }
-    return retVal;
+    if (entry.expiryNanos() != CachedEntry.NO_EXPIRY && System.nanoTime() >= entry.expiryNanos()) {
+      // Entry expired; evict lazily
+      synchronized (clearLock) {
+        baseMap.remove(mapKey);
+      }
+      missCount.incrementAndGet();
+      return null;
+    }
+    hitCount.incrementAndGet();
+    return entry.data();
   }
 
   @Override
   public void put(NamedKey key, byte[] value)
   {
     synchronized (clearLock) {
-      baseMap.put(computeKey(getNamespaceId(key.namespace), key.key), value);
+      baseMap.put(computeKey(getNamespaceId(key.namespace), key.key), new CachedEntry(value, CachedEntry.NO_EXPIRY));
+    }
+  }
+
+  @Override
+  public void put(NamedKey key, byte[] value, int ttlSeconds)
+  {
+    synchronized (clearLock) {
+      baseMap.put(
+          computeKey(getNamespaceId(key.namespace), key.key),
+          new CachedEntry(value, System.nanoTime() + (long) ttlSeconds * 1_000_000_000L)
+      );
     }
   }
 
@@ -139,8 +159,8 @@ public class MapCache implements Cache
           toRemove.add(next);
         }
       }
-      for (ByteBuffer key : toRemove) {
-        baseMap.remove(key);
+      for (ByteBuffer mapKey : toRemove) {
+        baseMap.remove(mapKey);
       }
     }
   }

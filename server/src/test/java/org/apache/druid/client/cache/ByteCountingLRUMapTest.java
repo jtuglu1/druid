@@ -40,6 +40,12 @@ public class ByteCountingLRUMapTest
     map = new ByteCountingLRUMap(100);
   }
 
+  /** Wraps a byte array in a no-TTL {@link CachedEntry}. */
+  private static CachedEntry entry(byte[] data)
+  {
+    return new CachedEntry(data, CachedEntry.NO_EXPIRY);
+  }
+
   @Test
   public void testSanity()
   {
@@ -50,24 +56,24 @@ public class ByteCountingLRUMapTest
     final ByteBuffer twoByte = ByteBuffer.allocate(2);
 
     assertMapValues(0, 0, 0);
-    map.put(tenKey, eightNineNineVal);
+    map.put(tenKey, entry(eightNineNineVal));
     assertMapValues(1, 99, 0);
-    Assert.assertEquals(ByteBuffer.wrap(eightNineNineVal), ByteBuffer.wrap(map.get(tenKey)));
+    Assert.assertEquals(ByteBuffer.wrap(eightNineNineVal), ByteBuffer.wrap(map.get(tenKey).data()));
 
-    map.put(oneByte, oneByte.array());
+    map.put(oneByte, entry(oneByte.array()));
     assertMapValues(1, 2, 1);
     Assert.assertNull(map.get(tenKey));
-    Assert.assertEquals(oneByte, ByteBuffer.wrap(map.get(oneByte)));
+    Assert.assertEquals(oneByte, ByteBuffer.wrap(map.get(oneByte).data()));
 
-    map.put(tenKey, eightyEightVal);
+    map.put(tenKey, entry(eightyEightVal));
     assertMapValues(2, 100, 1);
-    Assert.assertEquals(oneByte, ByteBuffer.wrap(map.get(oneByte)));
-    Assert.assertEquals(ByteBuffer.wrap(eightyEightVal), ByteBuffer.wrap(map.get(tenKey)));
+    Assert.assertEquals(oneByte, ByteBuffer.wrap(map.get(oneByte).data()));
+    Assert.assertEquals(ByteBuffer.wrap(eightyEightVal), ByteBuffer.wrap(map.get(tenKey).data()));
 
-    map.put(twoByte, oneByte.array());
+    map.put(twoByte, entry(oneByte.array()));
     assertMapValues(1, 3, 3);
-    Assert.assertEquals(null, map.get(tenKey));
-    Assert.assertEquals(oneByte, ByteBuffer.wrap(map.get(twoByte)));
+    Assert.assertNull(map.get(tenKey));
+    Assert.assertEquals(oneByte, ByteBuffer.wrap(map.get(twoByte).data()));
 
     Iterator<ByteBuffer> it = map.keySet().iterator();
     List<ByteBuffer> toRemove = new ArrayList<>();
@@ -92,10 +98,10 @@ public class ByteCountingLRUMapTest
     final ByteBuffer k = ByteBuffer.allocate(1);
 
     assertMapValues(0, 0, 0);
-    map.put(k, new byte[1]); //-V6033: suppress "An item with the same key has already been added"
-    map.put(k, new byte[2]); //-V6033
-    map.put(k, new byte[5]); //-V6033
-    map.put(k, new byte[3]); //-V6033
+    map.put(k, entry(new byte[1])); //-V6033: suppress "An item with the same key has already been added"
+    map.put(k, entry(new byte[2])); //-V6033
+    map.put(k, entry(new byte[5])); //-V6033
+    map.put(k, entry(new byte[3])); //-V6033
     assertMapValues(1, 4, 0);
   }
 

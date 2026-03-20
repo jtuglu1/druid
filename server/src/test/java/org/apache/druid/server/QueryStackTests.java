@@ -27,6 +27,7 @@ import com.google.common.collect.Maps;
 import com.google.inject.Injector;
 import org.apache.druid.client.cache.Cache;
 import org.apache.druid.client.cache.CacheConfig;
+import org.apache.druid.client.cache.IntervalCacheConfig;
 import org.apache.druid.guice.DruidInjectorBuilder;
 import org.apache.druid.guice.ExpressionModule;
 import org.apache.druid.guice.SegmentWranglerModule;
@@ -187,6 +188,7 @@ public class QueryStackTests
         serverConfig,
         injector.getInstance(Cache.class),
         injector.getInstance(CacheConfig.class),
+        new IntervalCacheConfig(),
         new SubqueryGuardrailHelper(null, JvmUtils.getRuntimeInfo().getMaxHeapSizeBytes(), 1),
         new SubqueryCountStatsProvider(),
         new DefaultGenericQueryMetricsFactory()

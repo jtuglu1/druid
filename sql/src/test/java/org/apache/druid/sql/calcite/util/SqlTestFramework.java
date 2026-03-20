@@ -1160,6 +1160,7 @@ public class SqlTestFramework
           serverConfig,
           injector.getInstance(Cache.class),
           injector.getInstance(CacheConfig.class),
+          new org.apache.druid.client.cache.IntervalCacheConfig(),
           new SubqueryGuardrailHelper(null, JvmUtils.getRuntimeInfo().getMaxHeapSizeBytes(), 1),
           new SubqueryCountStatsProvider(),
           new DefaultGenericQueryMetricsFactory()

@@ -48,6 +48,7 @@ import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.guice.BrokerProcessingModule;
 import org.apache.druid.guice.BrokerServiceModule;
 import org.apache.druid.guice.CacheModule;
+import org.apache.druid.guice.IntervalCacheModule;
 import org.apache.druid.guice.Jerseys;
 import org.apache.druid.guice.JoinableFactoryModule;
 import org.apache.druid.guice.JsonConfigProvider;
@@ -154,6 +155,7 @@ public class CliBroker extends ServerRunnable
 
           JsonConfigProvider.bind(binder, "druid.broker.cache", CacheConfig.class);
           binder.install(new CacheModule());
+          binder.install(new IntervalCacheModule());
 
           JsonConfigProvider.bind(binder, "druid.broker.select", TierSelectorStrategy.class);
           JsonConfigProvider.bind(binder, "druid.broker.select.tier.custom", CustomTierSelectorStrategyConfig.class);

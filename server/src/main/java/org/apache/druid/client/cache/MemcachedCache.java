@@ -533,6 +533,22 @@ public class MemcachedCache implements Cache
     }
   }
 
+  @Override
+  public void put(NamedKey key, byte[] value, int ttlSeconds)
+  {
+    try (final ResourceHolder<MemcachedClientIF> clientHolder = client.get()) {
+      clientHolder.get().set(
+          computeKeyHash(memcachedPrefix, key),
+          ttlSeconds,
+          serializeValue(key, value)
+      );
+    }
+    catch (IllegalStateException e) {
+      errorCount.incrementAndGet();
+      log.warn(e, "Unable to queue cache operation");
+    }
+  }
+
   private static byte[] serializeValue(NamedKey key, byte[] value)
   {
     byte[] keyBytes = key.toByteArray();

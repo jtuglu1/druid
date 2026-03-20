@@ -30,6 +30,7 @@ import org.apache.druid.client.CachingClusteredClient;
 import org.apache.druid.client.DirectDruidClient;
 import org.apache.druid.client.cache.Cache;
 import org.apache.druid.client.cache.CacheConfig;
+import org.apache.druid.client.cache.IntervalCacheConfig;
 import org.apache.druid.error.DruidException;
 import org.apache.druid.frame.allocation.ArenaMemoryAllocatorFactory;
 import org.apache.druid.frame.write.UnsupportedColumnTypeException;
@@ -48,6 +49,7 @@ import org.apache.druid.query.FrameSignaturePair;
 import org.apache.druid.query.GenericQueryMetricsFactory;
 import org.apache.druid.query.GlobalTableDataSource;
 import org.apache.druid.query.InlineDataSource;
+import org.apache.druid.query.IntervalCachingQueryRunner;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryContexts;
@@ -115,6 +117,7 @@ public class ClientQuerySegmentWalker implements QuerySegmentWalker
   private final ServerConfig serverConfig;
   private final Cache cache;
   private final CacheConfig cacheConfig;
+  private final IntervalCacheConfig intervalCacheConfig;
   private final SubqueryGuardrailHelper subqueryGuardrailHelper;
   private final SubqueryCountStatsProvider subqueryStatsProvider;
   private final GenericQueryMetricsFactory genericQueryMetricsFactory;
@@ -130,6 +133,7 @@ public class ClientQuerySegmentWalker implements QuerySegmentWalker
       ServerConfig serverConfig,
       Cache cache,
       CacheConfig cacheConfig,
+      IntervalCacheConfig intervalCacheConfig,
       SubqueryGuardrailHelper subqueryGuardrailHelper,
       SubqueryCountStatsProvider subqueryStatsProvider,
       GenericQueryMetricsFactory genericQueryMetricsFactory
@@ -145,6 +149,7 @@ public class ClientQuerySegmentWalker implements QuerySegmentWalker
     this.serverConfig = serverConfig;
     this.cache = cache;
     this.cacheConfig = cacheConfig;
+    this.intervalCacheConfig = intervalCacheConfig;
     this.subqueryGuardrailHelper = subqueryGuardrailHelper;
     this.subqueryStatsProvider = subqueryStatsProvider;
     this.genericQueryMetricsFactory = genericQueryMetricsFactory;
@@ -162,6 +167,7 @@ public class ClientQuerySegmentWalker implements QuerySegmentWalker
       ServerConfig serverConfig,
       Cache cache,
       CacheConfig cacheConfig,
+      IntervalCacheConfig intervalCacheConfig,
       SubqueryGuardrailHelper subqueryGuardrailHelper,
       SubqueryCountStatsProvider subqueryStatsProvider,
       GenericQueryMetricsFactory genericQueryMetricsFactory
@@ -178,6 +184,7 @@ public class ClientQuerySegmentWalker implements QuerySegmentWalker
         serverConfig,
         cache,
         cacheConfig,
+        intervalCacheConfig,
         subqueryGuardrailHelper,
         subqueryStatsProvider,
         genericQueryMetricsFactory
@@ -596,7 +603,14 @@ public class ClientQuerySegmentWalker implements QuerySegmentWalker
         .map(
             runner ->
                 new ResultLevelCachingQueryRunner<>(
-                    runner,
+                    new IntervalCachingQueryRunner<>(
+                        runner,
+                        toolChest,
+                        query,
+                        cache,
+                        intervalCacheConfig,
+                        objectMapper
+                    ),
                     toolChest,
                     query,
                     objectMapper,

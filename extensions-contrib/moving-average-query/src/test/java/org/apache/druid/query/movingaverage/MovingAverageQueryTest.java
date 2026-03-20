@@ -379,6 +379,7 @@ public class MovingAverageQueryTest extends InitializedNullHandlingTest
         serverConfig,
         null,
         new CacheConfig(),
+        new org.apache.druid.client.cache.IntervalCacheConfig(),
         new SubqueryGuardrailHelper(null, JvmUtils.getRuntimeInfo().getMaxHeapSizeBytes(), 1),
         new SubqueryCountStatsProvider(),
         new DefaultGenericQueryMetricsFactory()

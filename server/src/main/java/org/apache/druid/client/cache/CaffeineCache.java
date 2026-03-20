@@ -21,6 +21,7 @@ package org.apache.druid.client.cache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
@@ -50,7 +51,7 @@ public class CaffeineCache implements org.apache.druid.client.cache.Cache
   private static final LZ4FastDecompressor LZ4_DECOMPRESSOR = LZ4_FACTORY.fastDecompressor();
   private static final LZ4Compressor LZ4_COMPRESSOR = LZ4_FACTORY.fastCompressor();
 
-  private final Cache<NamedKey, byte[]> cache;
+  private final Cache<NamedKey, CachedEntry> cache;
   private final AtomicReference<CacheStats> priorStats = new AtomicReference<>(CacheStats.empty());
   private final CaffeineCacheConfig config;
 
@@ -62,26 +63,54 @@ public class CaffeineCache implements org.apache.druid.client.cache.Cache
   // Used in testing
   public static CaffeineCache create(final CaffeineCacheConfig config, final Executor executor)
   {
+    final long globalAccessNanos = config.getExpireAfter() >= 0
+                                   ? TimeUnit.MILLISECONDS.toNanos(config.getExpireAfter())
+                                   : Long.MAX_VALUE;
+
     Caffeine<Object, Object> builder = Caffeine.newBuilder().recordStats();
-    if (config.getExpireAfter() >= 0) {
-      builder
-          .expireAfterAccess(config.getExpireAfter(), TimeUnit.MILLISECONDS);
-    }
+    builder.expireAfter(new Expiry<NamedKey, CachedEntry>()
+    {
+      @Override
+      public long expireAfterCreate(NamedKey key, CachedEntry entry, long currentTime)
+      {
+        if (entry.expiryNanos() != CachedEntry.NO_EXPIRY) {
+          return Math.max(0, entry.expiryNanos() - currentTime);
+        }
+        return globalAccessNanos;
+      }
+
+      @Override
+      public long expireAfterUpdate(NamedKey key, CachedEntry entry, long currentTime, long currentDuration)
+      {
+        return expireAfterCreate(key, entry, currentTime);
+      }
+
+      @Override
+      public long expireAfterRead(NamedKey key, CachedEntry entry, long currentTime, long currentDuration)
+      {
+        if (entry.expiryNanos() != CachedEntry.NO_EXPIRY) {
+          // TTL entries: do not renew on read — use remaining duration
+          return currentDuration;
+        }
+        // Access-based: renew on read
+        return globalAccessNanos;
+      }
+    });
     if (config.getSizeInBytes() >= 0) {
       builder.maximumWeight(config.getSizeInBytes());
     } else {
       builder.maximumWeight(Math.min(MAX_DEFAULT_BYTES, JvmUtils.getRuntimeInfo().getMaxHeapSizeBytes() / 20));
     }
     builder
-        .weigher((NamedKey key, byte[] value) -> value.length
-                                                 + key.key.length
-                                                 + key.namespace.length() * Character.BYTES
-                                                 + FIXED_COST)
+        .weigher((NamedKey key, CachedEntry entry) -> entry.data().length
+                                                      + key.key.length
+                                                      + key.namespace.length() * Character.BYTES
+                                                      + FIXED_COST)
         .executor(executor);
     return new CaffeineCache(builder.build(), config);
   }
 
-  private CaffeineCache(final Cache<NamedKey, byte[]> cache, CaffeineCacheConfig config)
+  private CaffeineCache(final Cache<NamedKey, CachedEntry> cache, CaffeineCacheConfig config)
   {
     this.cache = cache;
     this.config = config;
@@ -90,13 +119,20 @@ public class CaffeineCache implements org.apache.druid.client.cache.Cache
   @Override
   public byte[] get(NamedKey key)
   {
-    return deserialize(cache.getIfPresent(key));
+    final CachedEntry entry = cache.getIfPresent(key);
+    return entry == null ? null : deserialize(entry.data());
   }
 
   @Override
   public void put(NamedKey key, byte[] value)
   {
-    cache.put(key, serialize(value));
+    cache.put(key, new CachedEntry(serialize(value), CachedEntry.NO_EXPIRY));
+  }
+
+  @Override
+  public void put(NamedKey key, byte[] value, int ttlSeconds)
+  {
+    cache.put(key, new CachedEntry(serialize(value), System.nanoTime() + (long) ttlSeconds * 1_000_000_000L));
   }
 
   @Override
@@ -104,7 +140,9 @@ public class CaffeineCache implements org.apache.druid.client.cache.Cache
   {
     // The assumption here is that every value is accessed at least once. Materializing here ensures deserialize is only
     // called *once* per value.
-    return ImmutableMap.copyOf(Maps.transformValues(cache.getAllPresent(keys), this::deserialize));
+    return ImmutableMap.copyOf(
+        Maps.transformValues(cache.getAllPresent(keys), entry -> deserialize(entry.data()))
+    );
   }
 
   // This is completely racy with put. Any values missed should be evicted later anyways. So no worries.
@@ -172,7 +210,7 @@ public class CaffeineCache implements org.apache.druid.client.cache.Cache
   }
 
   @VisibleForTesting
-  Cache<NamedKey, byte[]> getCache()
+  Cache<NamedKey, CachedEntry> getCache()
   {
     return cache;
   }
