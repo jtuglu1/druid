@@ -52,6 +52,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 import java.io.IOException;
 import java.net.URI;
 import java.util.List;
+import java.util.Map;
 
 @RunWith(EasyMockRunner.class)
 public class S3DataSegmentKillerTest extends EasyMockSupport
@@ -560,6 +561,159 @@ public class S3DataSegmentKillerTest extends EasyMockSupport
     EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
     segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
     segmentKiller.kill(List.of(DATA_SEGMENT_1_NO_ZIP));
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_deletesAllObjectsUnderPrefix() throws IOException
+  {
+    S3Object object1 = S3TestUtils.newS3ObjectSummary(TEST_PREFIX + "/shuffle-data/task1/part0.gz", TIME_0);
+    S3Object object2 = S3TestUtils.newS3ObjectSummary(TEST_PREFIX + "/shuffle-data/task1/part1.gz", TIME_1);
+
+    URI prefixUri = URI.create(
+        StringUtils.format("s3://%s/%s/shuffle-data/task1/", TEST_BUCKET, TEST_PREFIX)
+    );
+    S3TestUtils.expectListObjects(s3Client, prefixUri, List.of(object1, object2));
+
+    // MAX_KEYS=1, so deleteObjectsInPath flushes a batch after each key
+    DeleteObjectsRequest deleteRequest1 = DeleteObjectsRequest.builder()
+        .bucket(TEST_BUCKET)
+        .delete(Delete.builder()
+            .objects(ObjectIdentifier.builder().key(TEST_PREFIX + "/shuffle-data/task1/part0.gz").build())
+            .build())
+        .build();
+    DeleteObjectsRequest deleteRequest2 = DeleteObjectsRequest.builder()
+        .bucket(TEST_BUCKET)
+        .delete(Delete.builder()
+            .objects(ObjectIdentifier.builder().key(TEST_PREFIX + "/shuffle-data/task1/part1.gz").build())
+            .build())
+        .build();
+    S3TestUtils.mockS3ClientDeleteObjects(
+        s3Client,
+        List.of(deleteRequest1, deleteRequest2),
+        Map.of()
+    );
+
+    EasyMock.expect(segmentPusherConfig.getBucket()).andReturn(TEST_BUCKET).anyTimes();
+    EasyMock.expect(segmentPusherConfig.getBaseKey()).andReturn(TEST_PREFIX).anyTimes();
+    EasyMock.expect(inputDataConfig.getMaxListingLength()).andReturn(MAX_KEYS).anyTimes();
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    segmentKiller.killRecursively("shuffle-data/task1");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_emptyBaseKey_usesRelativePathDirectly() throws IOException
+  {
+    // Single object so one delete request regardless of MAX_KEYS
+    S3Object object1 = S3TestUtils.newS3ObjectSummary("shuffle-data/task1/part0.gz", TIME_0);
+
+    URI prefixUri = URI.create(StringUtils.format("s3://%s/shuffle-data/task1/", TEST_BUCKET));
+    S3TestUtils.expectListObjects(s3Client, prefixUri, List.of(object1));
+
+    DeleteObjectsRequest deleteRequest = DeleteObjectsRequest.builder()
+        .bucket(TEST_BUCKET)
+        .delete(Delete.builder()
+            .objects(ObjectIdentifier.builder().key("shuffle-data/task1/part0.gz").build())
+            .build())
+        .build();
+    S3TestUtils.mockS3ClientDeleteObjects(s3Client, List.of(deleteRequest), Map.of());
+
+    EasyMock.expect(segmentPusherConfig.getBucket()).andReturn(TEST_BUCKET).anyTimes();
+    EasyMock.expect(segmentPusherConfig.getBaseKey()).andReturn("").anyTimes();
+    EasyMock.expect(inputDataConfig.getMaxListingLength()).andReturn(MAX_KEYS).anyTimes();
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    segmentKiller.killRecursively("shuffle-data/task1");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_noBucketConfigured_noOp() throws IOException
+  {
+    EasyMock.expect(segmentPusherConfig.getBucket()).andReturn(null).anyTimes();
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    // Should not throw and should not call s3Client
+    segmentKiller.killRecursively("shuffle-data/task1");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_emptyRelativePath_noOp() throws IOException
+  {
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    segmentKiller.killRecursively("");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_absolutePath_noOp() throws IOException
+  {
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    segmentKiller.killRecursively("/shuffle-data/task1");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_backslashInPath_noOp() throws IOException
+  {
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    segmentKiller.killRecursively("shuffle-data\\task1");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_dotDotSegment_noOp() throws IOException
+  {
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    segmentKiller.killRecursively("shuffle-data/../task1");
+    EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
+  }
+
+  @Test
+  public void test_killRecursively_s3DeleteFailure_throwsIOException()
+  {
+    // Single object; the non-recoverable exception causes all retries to fail and propagates as IOException
+    S3Object object1 = S3TestUtils.newS3ObjectSummary(TEST_PREFIX + "/shuffle-data/task1/part0.gz", TIME_0);
+
+    URI prefixUri = URI.create(
+        StringUtils.format("s3://%s/%s/shuffle-data/task1/", TEST_BUCKET, TEST_PREFIX)
+    );
+    S3TestUtils.expectListObjects(s3Client, prefixUri, List.of(object1));
+
+    DeleteObjectsRequest deleteRequest = DeleteObjectsRequest.builder()
+        .bucket(TEST_BUCKET)
+        .delete(Delete.builder()
+            .objects(ObjectIdentifier.builder().key(TEST_PREFIX + "/shuffle-data/task1/part0.gz").build())
+            .build())
+        .build();
+    // Non-recoverable exception: no retry, so only the exception expectation is needed (not in success list)
+    S3TestUtils.mockS3ClientDeleteObjects(
+        s3Client,
+        List.of(),
+        Map.of(deleteRequest, NON_RECOVERABLE_EXCEPTION)
+    );
+
+    EasyMock.expect(segmentPusherConfig.getBucket()).andReturn(TEST_BUCKET).anyTimes();
+    EasyMock.expect(segmentPusherConfig.getBaseKey()).andReturn(TEST_PREFIX).anyTimes();
+    EasyMock.expect(inputDataConfig.getMaxListingLength()).andReturn(MAX_KEYS).anyTimes();
+    EasyMock.replay(s3Client, segmentPusherConfig, inputDataConfig);
+
+    segmentKiller = new S3DataSegmentKiller(Suppliers.ofInstance(s3Client), segmentPusherConfig, inputDataConfig);
+    Assert.assertThrows(IOException.class, () -> segmentKiller.killRecursively("shuffle-data/task1"));
     EasyMock.verify(s3Client, segmentPusherConfig, inputDataConfig);
   }
 

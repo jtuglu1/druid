@@ -20,11 +20,14 @@
 package org.apache.druid.storage.s3;
 
 import com.google.common.base.Predicates;
+import com.google.common.base.Strings;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
 import com.google.inject.Inject;
+import org.apache.druid.java.util.common.IOE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.MapUtils;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.loading.DataSegmentKiller;
 import org.apache.druid.segment.loading.SegmentLoadingException;
@@ -206,6 +209,55 @@ public class S3DataSegmentKiller implements DataSegmentKiller
     }
     catch (S3Exception e) {
       throw new SegmentLoadingException(e, "Couldn't kill segment[%s]: [%s]", segment.getId(), e);
+    }
+  }
+
+  @Override
+  public void killRecursively(String relativePath) throws IOException
+  {
+    if (Strings.isNullOrEmpty(relativePath)) {
+      log.warn("Skipping S3 recursive kill: relative path is empty");
+      return;
+    }
+    if (relativePath.charAt(0) == '/') {
+      log.warn("Skipping S3 recursive kill: relative path must not be absolute, got [%s]", relativePath);
+      return;
+    }
+    if (relativePath.indexOf('\\') >= 0) {
+      log.warn("Skipping S3 recursive kill: backslash not allowed in path [%s]", relativePath);
+      return;
+    }
+    for (String segment : org.apache.commons.lang3.StringUtils.splitPreserveAllTokens(relativePath, '/')) {
+      if (segment.isEmpty() || "..".equals(segment)) {
+        log.warn("Skipping S3 recursive kill: invalid path[%s]", relativePath);
+        return;
+      }
+    }
+
+    final String bucket = segmentPusherConfig.getBucket();
+    if (bucket == null) {
+      log.warn("Skipping S3 recursive kill: S3 bucket not configured");
+      return;
+    }
+
+    final String baseKey = segmentPusherConfig.getBaseKey();
+    final String prefix = (Strings.isNullOrEmpty(baseKey) ? relativePath : baseKey + "/" + relativePath) + "/";
+
+    log.info("Deleting deep storage prefix[s3://%s/%s]", bucket, prefix);
+    try {
+      S3Utils.deleteObjectsInPath(
+          s3ClientSupplier.get(),
+          inputDataConfig.getMaxListingLength(),
+          bucket,
+          prefix,
+          Predicates.alwaysTrue()
+      );
+    }
+    catch (Exception e) {
+      throw new IOE(
+          StringUtils.format("Failed to delete deep storage prefix[s3://%s/%s]", bucket, prefix),
+          e
+      );
     }
   }
 
