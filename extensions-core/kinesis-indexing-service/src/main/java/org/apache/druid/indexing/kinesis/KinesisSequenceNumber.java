@@ -109,7 +109,7 @@ public class KinesisSequenceNumber extends OrderedSequenceNumber<String>
   @Override
   public int compareTo(OrderedSequenceNumber<String> o)
   {
-    KinesisSequenceNumber num = (KinesisSequenceNumber) o;
+    final KinesisSequenceNumber num = (KinesisSequenceNumber) o;
     if (isUnread() && num.isUnread()) {
       return 0;
     } else if (isUnread()) {
@@ -124,7 +124,7 @@ public class KinesisSequenceNumber extends OrderedSequenceNumber<String>
     } else if (num.isMaxSequenceNumber) {
       return -1;
     }
-    return this.intSequence.compareTo(new BigInteger(o.get()));
+    return this.intSequence.compareTo(num.intSequence);
   }
 
   @Override

@@ -428,10 +428,13 @@ public abstract class BaseAppenderatorDriver implements Closeable
 
     if (identifier != null) {
       try {
+        final Supplier<Committer> wrappedCommitterSupplier = committerSupplier == null || !allowIncrementalPersists
+                                                             ? null
+                                                             : wrapCommitterSupplier(committerSupplier);
         final Appenderator.AppenderatorAddResult result = appenderator.add(
             identifier,
             row,
-            committerSupplier == null ? null : wrapCommitterSupplier(committerSupplier),
+            wrappedCommitterSupplier,
             allowIncrementalPersists
         );
         return AppenderatorDriverAddResult.ok(

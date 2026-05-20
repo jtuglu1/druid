@@ -350,15 +350,15 @@ public class StreamAppenderator implements Appenderator
 
     boolean isPersistRequired = false;
     boolean persist = false;
-    List<String> persistReasons = new ArrayList<>();
+    List<String> persistReasons = null;
 
     if (!sink.canAppendRow()) {
       persist = true;
-      persistReasons.add("No more rows can be appended to sink");
+      persistReasons = addPersistReason(persistReasons, "No more rows can be appended to sink");
     }
     if (currTs > nextFlush) {
       persist = true;
-      persistReasons.add(StringUtils.format(
+      persistReasons = addPersistReason(persistReasons, StringUtils.format(
           "current time[%d] is greater than nextFlush[%d]",
           currTs,
           nextFlush
@@ -366,7 +366,7 @@ public class StreamAppenderator implements Appenderator
     }
     if (rowsCurrentlyInMemory.get() >= tuningConfig.getMaxRowsInMemory()) {
       persist = true;
-      persistReasons.add(StringUtils.format(
+      persistReasons = addPersistReason(persistReasons, StringUtils.format(
           "rowsCurrentlyInMemory[%d] is greater than maxRowsInMemory[%d]",
           rowsCurrentlyInMemory.get(),
           tuningConfig.getMaxRowsInMemory()
@@ -374,16 +374,17 @@ public class StreamAppenderator implements Appenderator
     }
     if (bytesCurrentlyInMemory.get() >= maxBytesTuningConfig) {
       persist = true;
-      persistReasons.add(StringUtils.format(
+      persistReasons = addPersistReason(persistReasons, StringUtils.format(
           "(estimated) bytesCurrentlyInMemory[%d] is greater than maxBytesInMemory[%d]",
           bytesCurrentlyInMemory.get(),
           maxBytesTuningConfig
       ));
     }
     if (persist) {
+      final List<String> persistReasonsToLog = Preconditions.checkNotNull(persistReasons, "persistReasons");
       if (allowIncrementalPersists) {
         // persistAll clears rowsCurrentlyInMemory, no need to update it.
-        log.info("Flushing in-memory data to disk because %s.", String.join(",", persistReasons));
+        log.info("Flushing in-memory data to disk because %s.", String.join(",", persistReasonsToLog));
 
         long bytesToBePersisted = 0L;
         for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : sinks.entrySet()) {
@@ -449,11 +450,18 @@ public class StreamAppenderator implements Appenderator
             MoreExecutors.directExecutor()
         );
       } else {
-        log.info("Marking ready for non-incremental async persist due to reasons[%s].", persistReasons);
+        log.info("Marking ready for non-incremental async persist due to reasons[%s].", persistReasonsToLog);
         isPersistRequired = true;
       }
     }
     return new AppenderatorAddResult(identifier, sink.getNumRows(), isPersistRequired);
+  }
+
+  private static List<String> addPersistReason(@Nullable final List<String> persistReasons, final String reason)
+  {
+    final List<String> updatedPersistReasons = persistReasons == null ? new ArrayList<>() : persistReasons;
+    updatedPersistReasons.add(reason);
+    return updatedPersistReasons;
   }
 
   @Override

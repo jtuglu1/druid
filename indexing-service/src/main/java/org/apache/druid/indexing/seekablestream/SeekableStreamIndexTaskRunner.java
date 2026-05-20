@@ -666,11 +666,7 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
               final List<InputRow> rows = reader.parse(record.getData(), isEndOfShard(record.getSequenceNumber()));
               boolean isPersistRequired = false;
 
-              final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceToUse = sequences
-                  .stream()
-                  .filter(sequenceMetadata -> sequenceMetadata.canHandle(this, record))
-                  .findFirst()
-                  .orElse(null);
+              final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceToUse = findSequenceToUse(record);
 
               if (sequenceToUse == null) {
                 throw new ISE(
@@ -705,13 +701,15 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
                     sequenceToCheckpoint = sequenceToUse;
                   }
                   isPersistRequired = isPersistRequired || addResult.isPersistRequired();
-                  partitionsThroughput.merge(record.getPartitionId(), 1L, Long::sum);
                 } else {
                   // Failure to allocate segment puts determinism at risk, bail out to be safe.
                   // May want configurable behavior here at some point.
                   // If we allow continuing, then consider blacklisting the interval for a while to avoid constant checks.
                   throw new ISE("Could not allocate segment for row with timestamp[%s]", row.getTimestamp());
                 }
+              }
+              if (!rows.isEmpty()) {
+                partitionsThroughput.merge(record.getPartitionId(), (long) rows.size(), Long::sum);
               }
               if (isPersistRequired) {
                 Futures.addCallback(
@@ -1293,6 +1291,19 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     return sequences.get(sequences.size() - 1);
   }
 
+  @Nullable
+  private SequenceMetadata<PartitionIdType, SequenceOffsetType> findSequenceToUse(
+      final OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType, RecordType> record
+  )
+  {
+    for (final SequenceMetadata<PartitionIdType, SequenceOffsetType> sequenceMetadata : sequences) {
+      if (sequenceMetadata.canHandle(this, record)) {
+        return sequenceMetadata;
+      }
+    }
+    return null;
+  }
+
   /**
    * Returns true if the given record has already been read, based on lastReadOffsets.
    */
@@ -1301,12 +1312,20 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
       final SequenceOffsetType recordSequenceNumber
   )
   {
+    return isRecordAlreadyRead(recordPartition, createSequenceNumber(recordSequenceNumber));
+  }
+
+  private boolean isRecordAlreadyRead(
+      final PartitionIdType recordPartition,
+      final OrderedSequenceNumber<SequenceOffsetType> recordSequenceNumber
+  )
+  {
     final SequenceOffsetType lastReadOffset = lastReadOffsets.get(recordPartition);
 
     if (lastReadOffset == null) {
       return false;
     } else {
-      return createSequenceNumber(recordSequenceNumber).compareTo(createSequenceNumber(lastReadOffset)) <= 0;
+      return recordSequenceNumber.compareTo(createSequenceNumber(lastReadOffset)) <= 0;
     }
   }
 
@@ -1319,7 +1338,15 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
       final SequenceOffsetType endSequenceNumber
   )
   {
-    return createSequenceNumber(recordSequenceNumber).isMoreToReadBeforeReadingRecord(
+    return isMoreToReadBeforeReadingRecord(createSequenceNumber(recordSequenceNumber), endSequenceNumber);
+  }
+
+  private boolean isMoreToReadBeforeReadingRecord(
+      final OrderedSequenceNumber<SequenceOffsetType> recordSequenceNumber,
+      final SequenceOffsetType endSequenceNumber
+  )
+  {
+    return recordSequenceNumber.isMoreToReadBeforeReadingRecord(
         createSequenceNumber(endSequenceNumber),
         isEndOffsetExclusive()
     );
@@ -2016,12 +2043,12 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
     }
 
     // Check if the record has already been read.
-    if (isRecordAlreadyRead(partition, recordOffset)) {
+    if (isRecordAlreadyRead(partition, recordSequenceNumber)) {
       return false;
     }
 
     // Finally, check if this record comes before the endOffsets for this partition.
-    return isMoreToReadBeforeReadingRecord(recordSequenceNumber.get(), endOffsets.get(partition));
+    return isMoreToReadBeforeReadingRecord(recordSequenceNumber, endOffsets.get(partition));
   }
 
   /**
