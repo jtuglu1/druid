@@ -117,6 +117,8 @@ public class DiscoveryDruidNodeTest
         ),
         NodeRole.BROKER,
         ImmutableMap.of(
+            BrokerNodeService.DISCOVERY_SERVICE_KEY,
+            new BrokerNodeService("broker_tier"),
             DataNodeService.DISCOVERY_SERVICE_KEY,
             new DataNodeService("_default_tier", 1000000000, 500000000L, ServerType.BROKER, 0),
             LookupNodeService.DISCOVERY_SERVICE_KEY,

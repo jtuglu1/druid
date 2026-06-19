@@ -43,6 +43,8 @@ import java.util.function.BooleanSupplier;
 public abstract class DruidNodeDiscoveryProvider
 {
   private static final Map<String, Set<NodeRole>> SERVICE_TO_NODE_TYPES = ImmutableMap.of(
+      BrokerNodeService.DISCOVERY_SERVICE_KEY,
+      ImmutableSet.of(NodeRole.BROKER),
       LookupNodeService.DISCOVERY_SERVICE_KEY,
       ImmutableSet.of(NodeRole.BROKER, NodeRole.HISTORICAL, NodeRole.PEON, NodeRole.INDEXER),
       DataNodeService.DISCOVERY_SERVICE_KEY,

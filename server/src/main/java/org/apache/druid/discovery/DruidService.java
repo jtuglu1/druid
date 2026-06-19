@@ -28,6 +28,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes(value = {
+    @JsonSubTypes.Type(name = BrokerNodeService.DISCOVERY_SERVICE_KEY, value = BrokerNodeService.class),
     @JsonSubTypes.Type(name = DataNodeService.DISCOVERY_SERVICE_KEY, value = DataNodeService.class),
     @JsonSubTypes.Type(name = LookupNodeService.DISCOVERY_SERVICE_KEY, value = LookupNodeService.class),
     @JsonSubTypes.Type(name = WorkerNodeService.DISCOVERY_SERVICE_KEY, value = WorkerNodeService.class)

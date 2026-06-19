@@ -21,6 +21,7 @@ package org.apache.druid.guice;
 
 import com.google.inject.multibindings.ProvidesIntoSet;
 import com.google.inject.name.Named;
+import org.apache.druid.discovery.BrokerNodeService;
 import org.apache.druid.discovery.DataNodeService;
 import org.apache.druid.discovery.DruidService;
 import org.apache.druid.discovery.LookupNodeService;
@@ -28,6 +29,13 @@ import org.apache.druid.discovery.NodeRole;
 
 public class BrokerServiceModule extends AbstractDruidServiceModule
 {
+  @ProvidesIntoSet
+  @Named(NodeRole.BROKER_JSON_NAME)
+  public Class<? extends DruidService> getBrokerNodeService()
+  {
+    return BrokerNodeService.class;
+  }
+
   @ProvidesIntoSet
   @Named(NodeRole.BROKER_JSON_NAME)
   public Class<? extends DruidService> getDataNodeService()

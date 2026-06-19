@@ -85,6 +85,8 @@ This is summarized in the table below:
 
 The Router has a configurable list of strategies to determine which Brokers to route queries to. The order of the strategies is important because the Broker is selected immediately after the strategy condition is satisfied.
 
+The `druid.router.tierToBrokerMap` property maps data tiers, such as load-rule tiers, to Broker service names. The optional `druid.router.routableTiers` property filters the Broker nodes within those service names by the Broker's announced `druid.server.tier`. For example, `druid.router.tierToBrokerMap={"hot":"druid:broker-hot"}` and `druid.router.routableTiers=["hot-v1"]` routes the data tier `hot` to the Broker service `druid:broker-hot`, but only uses Brokers in that service whose `druid.server.tier` is `hot-v1`. If `druid.router.routableTiers` is unset, the Router does not filter Broker nodes by server tier. An empty `druid.router.routableTiers` list is invalid.
+
 ### timeBoundary
 
 ```json

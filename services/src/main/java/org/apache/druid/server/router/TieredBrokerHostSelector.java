@@ -26,6 +26,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.inject.Inject;
 import org.apache.druid.client.selector.Server;
+import org.apache.druid.discovery.BrokerNodeService;
 import org.apache.druid.discovery.DiscoveryDruidNode;
 import org.apache.druid.discovery.DruidNodeDiscovery;
 import org.apache.druid.discovery.DruidNodeDiscoveryProvider;
@@ -46,6 +47,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -138,7 +140,7 @@ public class TieredBrokerHostSelector
               nodes.forEach(
                   (node) -> {
                     NodesHolder nodesHolder = servers.get(node.getDruidNode().getServiceName());
-                    if (nodesHolder != null) {
+                    if (nodesHolder != null && isRoutableBroker(node)) {
                       nodesHolder.add(node.getDruidNode().getHostAndPortToUse(), TO_SERVER.apply(node));
                     }
                   }
@@ -247,6 +249,38 @@ public class TieredBrokerHostSelector
     }
 
     return getServerPair(brokerServiceName);
+  }
+
+  private boolean isRoutableBroker(final DiscoveryDruidNode node)
+  {
+    final Set<String> routableTiers = tierConfig.getRoutableTiers();
+    if (routableTiers == null) {
+      return true;
+    }
+
+    final BrokerNodeService brokerNodeService = node.getService(
+        BrokerNodeService.DISCOVERY_SERVICE_KEY,
+        BrokerNodeService.class
+    );
+    if (brokerNodeService == null) {
+      log.debug(
+          "Skipping Broker node [%s] because no Broker node service was announced and routable tiers [%s] are configured.",
+          node.getDruidNode().getHostAndPortToUse(),
+          routableTiers
+      );
+      return false;
+    }
+
+    final boolean routable = routableTiers.contains(brokerNodeService.getTier());
+    if (!routable) {
+      log.debug(
+          "Skipping Broker node [%s] with tier [%s] because routable tiers [%s] are configured.",
+          node.getDruidNode().getHostAndPortToUse(),
+          brokerNodeService.getTier(),
+          routableTiers
+      );
+    }
+    return routable;
   }
 
   /**

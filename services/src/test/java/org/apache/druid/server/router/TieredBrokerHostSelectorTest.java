@@ -28,6 +28,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import org.apache.druid.client.DruidServer;
 import org.apache.druid.client.selector.Server;
+import org.apache.druid.discovery.BrokerNodeService;
 import org.apache.druid.discovery.DiscoveryDruidNode;
 import org.apache.druid.discovery.DruidNodeDiscovery;
 import org.apache.druid.discovery.DruidNodeDiscoveryProvider;
@@ -56,6 +57,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  */
@@ -77,19 +79,28 @@ public class TieredBrokerHostSelectorTest
     node1 = new DiscoveryDruidNode(
         new DruidNode("hotBroker", "hotHost", false, 8080, null, true, false),
         NodeRole.BROKER,
-        ImmutableMap.of()
+        ImmutableMap.of(
+            BrokerNodeService.DISCOVERY_SERVICE_KEY,
+            new BrokerNodeService("hot-v1")
+        )
     );
 
     node2 = new DiscoveryDruidNode(
         new DruidNode("coldBroker", "coldHost1", false, 8080, null, true, false),
         NodeRole.BROKER,
-        ImmutableMap.of()
+        ImmutableMap.of(
+            BrokerNodeService.DISCOVERY_SERVICE_KEY,
+            new BrokerNodeService("cold-v1")
+        )
     );
 
     node3 = new DiscoveryDruidNode(
         new DruidNode("coldBroker", "coldHost2", false, 8080, null, true, false),
         NodeRole.BROKER,
-        ImmutableMap.of()
+        ImmutableMap.of(
+            BrokerNodeService.DISCOVERY_SERVICE_KEY,
+            new BrokerNodeService("cold-v1")
+        )
     );
 
     druidNodeDiscovery = new DruidNodeDiscovery()
@@ -383,6 +394,86 @@ public class TieredBrokerHostSelectorTest
     );
   }
 
+  @Test
+  public void testGetAllBrokersWithRoutableTiers()
+  {
+    final DiscoveryDruidNode hotV1Node = newBrokerNode("hotBroker", "hotV1Host", "hot-v1");
+    final DiscoveryDruidNode hotV2Node = newBrokerNode("hotBroker", "hotV2Host", "hot-v2");
+    final DiscoveryDruidNode nodeWithoutTier = new DiscoveryDruidNode(
+        new DruidNode("hotBroker", "hotNoTierHost", false, 8080, null, true, false),
+        NodeRole.BROKER,
+        ImmutableMap.of()
+    );
+
+    final DruidNodeDiscoveryProvider provider = EasyMock.createStrictMock(DruidNodeDiscoveryProvider.class);
+    EasyMock.expect(provider.getForNodeRole(NodeRole.BROKER))
+            .andReturn(newDiscovery(ImmutableList.of(hotV1Node, hotV2Node, nodeWithoutTier)));
+    EasyMock.replay(provider);
+
+    final TieredBrokerHostSelector selector = new TieredBrokerHostSelector(
+        new TestRuleManager(null),
+        new TestTieredBrokerConfig(ImmutableSet.of("hot-v1")),
+        provider,
+        Collections.emptyList()
+    );
+    selector.start();
+    try {
+      Assert.assertEquals(
+          ImmutableMap.of(
+              "mediumBroker", ImmutableList.of(),
+              "coldBroker", ImmutableList.of(),
+              "hotBroker", ImmutableList.of("hotV1Host:8080")
+          ),
+          Maps.transformValues(
+              selector.getAllBrokers(),
+              new Function<List<Server>, List<String>>()
+              {
+                @Override
+                public List<String> apply(@Nullable List<Server> servers)
+                {
+                  return Lists.transform(servers, server -> server.getHost());
+                }
+              }
+          )
+      );
+    }
+    finally {
+      selector.stop();
+      EasyMock.verify(provider);
+    }
+  }
+
+  private static DiscoveryDruidNode newBrokerNode(final String serviceName, final String host, final String tier)
+  {
+    return new DiscoveryDruidNode(
+        new DruidNode(serviceName, host, false, 8080, null, true, false),
+        NodeRole.BROKER,
+        ImmutableMap.of(
+            BrokerNodeService.DISCOVERY_SERVICE_KEY,
+            new BrokerNodeService(tier)
+        )
+    );
+  }
+
+  private static DruidNodeDiscovery newDiscovery(final List<DiscoveryDruidNode> nodes)
+  {
+    return new DruidNodeDiscovery()
+    {
+      @Override
+      public Collection<DiscoveryDruidNode> getAllNodes()
+      {
+        return nodes;
+      }
+
+      @Override
+      public void registerListener(Listener listener)
+      {
+        listener.nodesAdded(nodes);
+        listener.nodeViewInitialized();
+      }
+    };
+  }
+
   private SqlQuery createSqlQueryWithContext(Map<String, Object> queryContext)
   {
     return new SqlQuery(
@@ -423,6 +514,42 @@ public class TieredBrokerHostSelectorTest
               null
           )
       );
+    }
+  }
+
+  private static class TestTieredBrokerConfig extends TieredBrokerConfig
+  {
+    @Nullable
+    private final Set<String> routableTiers;
+
+    private TestTieredBrokerConfig(@Nullable Set<String> routableTiers)
+    {
+      this.routableTiers = routableTiers;
+    }
+
+    @Override
+    public LinkedHashMap<String, String> getTierToBrokerMap()
+    {
+      return new LinkedHashMap<>(
+          ImmutableMap.of(
+              "hot", "hotBroker",
+              "medium", "mediumBroker",
+              DruidServer.DEFAULT_TIER, "coldBroker"
+          )
+      );
+    }
+
+    @Override
+    public String getDefaultBrokerServiceName()
+    {
+      return "hotBroker";
+    }
+
+    @Nullable
+    @Override
+    public Set<String> getRoutableTiers()
+    {
+      return routableTiers;
     }
   }
 }

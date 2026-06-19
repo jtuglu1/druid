@@ -23,12 +23,16 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.client.DruidServer;
+import org.apache.druid.java.util.common.IAE;
 import org.joda.time.Period;
 
+import javax.annotation.Nullable;
 import javax.validation.constraints.NotNull;
+import javax.validation.constraints.Size;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 
 /**
  */
@@ -44,6 +48,10 @@ public class TieredBrokerConfig
 
   @JsonProperty
   private LinkedHashMap<String, String> tierToBrokerMap;
+
+  @JsonProperty
+  @Size(min = 1)
+  private Set<String> routableTiers = null;
 
   @JsonProperty
   @NotNull
@@ -73,6 +81,15 @@ public class TieredBrokerConfig
   public String getDefaultBrokerServiceName()
   {
     return defaultBrokerServiceName;
+  }
+
+  @Nullable
+  public Set<String> getRoutableTiers()
+  {
+    if (routableTiers != null && routableTiers.isEmpty()) {
+      throw new IAE("druid.router.routableTiers must be null or contain at least one tier.");
+    }
+    return routableTiers;
   }
 
   public String getDefaultRule()

@@ -2267,6 +2267,7 @@ Supported query contexts:
 |--------|-----------|-------|
 |`druid.router.defaultBrokerServiceName`|The default Broker to connect to in case service discovery fails.|`druid/broker`|
 |`druid.router.tierToBrokerMap`|Queries for a certain tier of data are routed to their appropriate Broker. This value should be an ordered JSON map of tiers to Broker names. The priority of Brokers is based on the ordering.|`{"_default_tier": "<defaultBrokerServiceName>"}`|
+|`druid.router.routableTiers`|Optional list of Broker server tiers that the Router can route queries to. When set, the Router only adds Broker nodes whose announced `druid.server.tier` is in this list. If unset, the Router does not filter Broker nodes by server tier. An empty list is invalid.|`null`|
 |`druid.router.defaultRule`|The default rule for all datasources.|`_default`|
 |`druid.router.pollPeriod`|How often to poll for new rules.|`PT1M`|
 |`druid.router.sql.enable`|Enable routing of SQL queries using strategies. When`true`, the Router uses the  strategies defined in `druid.router.strategies` to determine the broker service for a given SQL query. When `false`, the Router uses the `defaultBrokerServiceName`.|`false`|
