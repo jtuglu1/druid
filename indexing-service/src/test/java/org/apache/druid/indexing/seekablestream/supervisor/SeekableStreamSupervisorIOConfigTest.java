@@ -98,7 +98,7 @@ public class SeekableStreamSupervisorIOConfigTest
   public void testTaskCountResolutionInConstructor()
   {
     // Constructor priority is "explicit taskCount > taskCountStart > taskCountMin" so that a
-    // previously autoscaled taskCount survives a Jackson round-trip through the metadata store.
+    // persisted taskCount survives a Jackson round-trip through the metadata store.
 
     // taskCount=10 + taskCountStart=5 -> taskCount wins, isExplicit=true.
     assertTaskCount(10, autoScaler(5, 3), 10, true);

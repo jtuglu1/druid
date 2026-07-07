@@ -1356,7 +1356,8 @@ public class SeekableStreamSupervisorSpecTest extends SeekableStreamSupervisorTe
   }
 
   @Test
-  public void test_changeTaskCountInIOConfig_handlesExceptionAndStillUpdatesTaskCount() throws InterruptedException
+  public void test_changeTaskCountInIOConfig_updatesTaskCountWithoutPersistingSupervisorSpec()
+      throws InterruptedException
   {
     EasyMock.expect(spec.getId()).andReturn(SUPERVISOR).anyTimes();
     EasyMock.expect(spec.getSupervisorStateManagerConfig()).andReturn(supervisorConfig).anyTimes();
@@ -1373,18 +1374,14 @@ public class SeekableStreamSupervisorSpecTest extends SeekableStreamSupervisorTe
     EasyMock.expect(ingestionSchema.getTuningConfig()).andReturn(seekableStreamSupervisorTuningConfig).anyTimes();
     EasyMock.replay(ingestionSchema);
 
-    // SupervisorManager present but metadata insert fails → should be handled
-    SupervisorManager sm = EasyMock.createMock(SupervisorManager.class);
-    MetadataSupervisorManager msm = EasyMock.createMock(MetadataSupervisorManager.class);
+    final MetadataSupervisorManager metadataSupervisorManager = EasyMock.createMock(MetadataSupervisorManager.class);
+    final SupervisorManager supervisorManager = new SupervisorManager(mapper, metadataSupervisorManager);
     EasyMock.expect(taskMaster.getTaskRunner()).andReturn(Optional.absent()).anyTimes();
-    EasyMock.expect(taskMaster.getSupervisorManager()).andReturn(Optional.of(sm)).anyTimes();
-    EasyMock.expect(sm.getMetadataSupervisorManager()).andReturn(msm).anyTimes();
-    msm.insert(EasyMock.anyString(), EasyMock.anyObject());
-    EasyMock.expectLastCall().andThrow(new RuntimeException("boom")).anyTimes();
-    EasyMock.replay(taskMaster, sm, msm);
+    EasyMock.expect(taskMaster.getSupervisorManager()).andReturn(Optional.of(supervisorManager)).anyTimes();
+    EasyMock.replay(taskMaster, metadataSupervisorManager);
 
-    TestSeekableStreamSupervisor supervisor = new TestSeekableStreamSupervisor(10);
-    LagBasedAutoScaler autoScaler = new LagBasedAutoScaler(
+    final TestSeekableStreamSupervisor supervisor = new TestSeekableStreamSupervisor(10);
+    final LagBasedAutoScaler autoScaler = new LagBasedAutoScaler(
         supervisor,
         mapper.convertValue(
             getScaleOutProperties(2),
@@ -1398,15 +1395,15 @@ public class SeekableStreamSupervisorSpecTest extends SeekableStreamSupervisorTe
     autoScaler.start();
     supervisor.runInternal();
 
-    int before = supervisor.getIoConfig().getTaskCount();
+    final int before = supervisor.getIoConfig().getTaskCount();
     Assert.assertEquals(1, before);
     Thread.sleep(1000); // allow one dynamic allocation cycle
-    int after = supervisor.getIoConfig().getTaskCount();
-    // Even though metadata insert failed, taskCount should still be updated in ioConfig
+    final int after = supervisor.getIoConfig().getTaskCount();
     Assert.assertEquals(2, after);
 
     autoScaler.reset();
     autoScaler.stop();
+    EasyMock.verify(metadataSupervisorManager);
   }
 
   @Test

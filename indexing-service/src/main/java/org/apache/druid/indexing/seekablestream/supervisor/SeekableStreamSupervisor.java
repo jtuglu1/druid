@@ -94,7 +94,6 @@ import org.apache.druid.java.util.common.concurrent.ScheduledExecutors;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
-import org.apache.druid.metadata.MetadataSupervisorManager;
 import org.apache.druid.metadata.PendingSegmentRecord;
 import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.query.ordering.StringComparators;
@@ -693,7 +692,7 @@ public abstract class SeekableStreamSupervisor<PartitionIdType, SequenceOffsetTy
    *  <li><code>partitionIds</code>.
    * </ul>
    * These structures will be rebuiled in the next 'RunNotice'.
-   * <li>Finally, change the <code>taskCount</code> in <code>SeekableStreamSupervisorIOConfig</code> and sync it to <code>MetadataStorage</code>.
+   * <li>Finally, change the <code>taskCount</code> in <code>SeekableStreamSupervisorIOConfig</code>.
    * </ul>
    * After the taskCount is changed in SeekableStreamSupervisorIOConfig, next RunNotice will create scaled number of ingest tasks without resubmitting the supervisor.
    *
@@ -739,18 +738,6 @@ public abstract class SeekableStreamSupervisor<PartitionIdType, SequenceOffsetTy
   private void changeTaskCountInIOConfig(int desiredActiveTaskCount)
   {
     ioConfig.setTaskCount(desiredActiveTaskCount);
-    try {
-      Optional<SupervisorManager> supervisorManager = taskMaster.getSupervisorManager();
-      if (supervisorManager.isPresent()) {
-        MetadataSupervisorManager metadataSupervisorManager = supervisorManager.get().getMetadataSupervisorManager();
-        metadataSupervisorManager.insert(supervisorId, spec);
-      } else {
-        log.error("supervisorManager is null in taskMaster, skipping scale action for supervisor[%s] for dataSource[%s].", supervisorId, dataSource);
-      }
-    }
-    catch (Exception e) {
-      log.error(e, "Failed to sync taskCount to MetaStorage for supervisor[%s] for dataSource[%s].", supervisorId, dataSource);
-    }
   }
 
   /**

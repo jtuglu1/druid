@@ -4346,9 +4346,6 @@ public class SeekableStreamSupervisorStateTest extends EasyMockSupport
 
     EasyMock.expect(taskMaster.getTaskRunner()).andReturn(Optional.of(taskRunner)).anyTimes();
     EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
-    // changeTaskCountInIOConfig calls this; absent path just logs and moves on.
-    EasyMock.expect(taskMaster.getSupervisorManager()).andReturn(Optional.absent()).anyTimes();
-
     replayAll();
     return scalingEmitter;
   }
