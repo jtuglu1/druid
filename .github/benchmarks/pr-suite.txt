@@ -1,0 +1,88 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Curated set of query-path JMH benchmarks run by .github/workflows/benchmarks.yml.
+#
+# Format, one entry per line:
+#     <jmh-regex>   [extra jmh args]   # cost=<seconds>
+#
+# "cost" is an optional hint used only to balance entries across shards; it never affects
+# results, so a stale value costs a little wall clock and nothing else. It is the approximate
+# time for one pass of that entry at the default JMH args. Entries without it are assumed to
+# cost 10s. Re-measure with: java -jar benchmarks.jar '<regex>' <args> -f 1 -wi 0 -i 1
+#
+# The regex is matched against fully-qualified "Class.method" names. The whole line is
+# parsed with shell quoting rules, so anything containing spaces or shell metacharacters
+# must be quoted -- this includes regex alternations:
+#     'SomeBenchmark.match(This|That)'
+#     -p 'expression=long1 * long2'
+# JMH treats a comma as a value separator for -p, so parameter values that contain a
+# literal comma (e.g. "max(double3, double5)") cannot be selected here at all.
+#
+# Every entry runs 4 times per CI job (base and head x 2 alternating rounds). The 16 entries
+# below expand to 37 (method x param-combo) pairs, or roughly 45 minutes of JMH; treat that
+# as the ceiling when adding more. See benchmarks/README.md for the budget model and for how
+# to shrink a benchmark without losing signal.
+#
+# Global JMH args are supplied by .github/scripts/run_benchmarks.sh ($JMH_ARGS) and
+# override the @Warmup/@Measurement/@Fork annotations on these classes. Per-entry args
+# below override the global ones.
+
+# --- Tier 1: index, filter and aggregator hot paths (near-zero trial setup) ---
+
+# Vectorized aggregation over a raw ByteBuffer. @Setup(Level.Invocation), cheapest entry here.
+org.apache.druid.benchmark.DoubleMeanVectorAggregatorBenchmark   -p vectorSize=1024 -p nullPattern=none,sparse   # cost=9
+
+# Variance aggregator, scalar accumulate vs batch.
+org.apache.druid.benchmark.VarianceBenchmark                     -p vectorSize=1024   # cost=5
+
+# HLL sketch build/merge/serde. No parameters; "init" alone is too trivial to be useful.
+org.apache.druid.benchmark.DataSketchesHllBenchmark.initAndGet   # cost=3
+org.apache.druid.benchmark.DataSketchesHllBenchmark.initAndSerde   # cost=3
+org.apache.druid.benchmark.DataSketchesHllBenchmark.mergeUnionHolders   # cost=3
+
+# groupBy hash table probe path.
+org.apache.druid.benchmark.ByteBufferHashTableBenchmark          -p keySize=16   # cost=3
+
+# IN filter against a large dictionary. Already declares @Warmup(2) @Measurement(3).
+org.apache.druid.benchmark.InFilterBenchmark                     -p dictionarySize=1000000 -p filterSize=100   # cost=9
+
+# Bitmap-index filter matching. "matchHalf" is the representative case; matchNothing and
+# matchEverything are short-circuit paths that measure very little.
+org.apache.druid.benchmark.BoundFilterBenchmark.matchHalf.*      -p cardinality=100000   # cost=30
+org.apache.druid.benchmark.DimensionPredicateFilterBenchmark     -p cardinality=100000   # cost=15
+org.apache.druid.benchmark.LikeFilterBenchmark.matchLike.*       -p cardinality=100000   # cost=90
+
+# groupBy result row deserialization.
+org.apache.druid.benchmark.GroupByDeserializationBenchmark       -p numDimensions=100 -p primitiveToComplexDimensionRatio=0.5 -p complexDimensionType=json -p backwardCompatibility=false   # cost=3
+
+# --- Tier 2: cursor-level, SegmentGenerator-backed (moderate setup, cached per variant) ---
+# rowsPerSegment is cut from the declared 1000000 to 100000: at 100k rows the scan loop
+# still dominates cursor construction, so row-loop regressions remain visible.
+
+org.apache.druid.benchmark.ExpressionAggregationBenchmark        -p rowsPerSegment=100000   # cost=45
+org.apache.druid.benchmark.ExpressionFilterBenchmark             -p rowsPerSegment=100000   # cost=30
+
+# --- Vectorized vs non-vectorized ---
+# Every benchmark below that exposes a vectorize dimension runs both settings, so a change
+# that helps one path and hurts the other cannot hide. Keep both values when adding entries
+# here; pinning vectorize to a single value is how vectorization regressions go unnoticed.
+
+org.apache.druid.benchmark.ExpressionVectorSelectorBenchmark     -p rowsPerSegment=100000 -p vectorize=false,true -p 'expression=long1 * long2,parse_long(string1) * double3'   # cost=60
+org.apache.druid.benchmark.FilteredAggregatorBenchmark.querySingleQueryableIndex   -p rowsPerSegment=75000 -p vectorize=false,true -p descending=false   # cost=30
+# The only full query-engine entry in the suite: groupBy is where vectorization matters most.
+# numProcessingThreads is pinned to 1 (the default is 4) because the CI runner has 4 vCPUs and
+# the query threads would otherwise contend with the JMH JVM and add variance.
+org.apache.druid.benchmark.query.GroupByBenchmark.querySingleQueryableIndex   -p rowsPerSegment=100000 -p schemaAndQuery=basic.A -p queryGranularity=all -p vectorize=false,force -p numProcessingThreads=1 -p initialBuckets=-1 -p numSegments=1   # cost=30

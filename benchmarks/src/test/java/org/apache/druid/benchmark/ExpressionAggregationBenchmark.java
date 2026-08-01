@@ -24,6 +24,7 @@ import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.js.JavaScriptConfig;
+import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.query.aggregation.BufferAggregator;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.aggregation.JavaScriptAggregatorFactory;
@@ -69,13 +70,17 @@ import java.util.function.Function;
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 public class ExpressionAggregationBenchmark
 {
+  static {
+    ExpressionProcessing.initializeForTests();
+  }
+
   @Param({"1000000"})
   private int rowsPerSegment;
 
   private QueryableIndex index;
   private JavaScriptAggregatorFactory javaScriptAggregatorFactory;
   private DoubleSumAggregatorFactory expressionAggregatorFactory;
-  private ByteBuffer aggregationBuffer = ByteBuffer.allocate(Double.BYTES);
+  private ByteBuffer aggregationBuffer;
   private Closer closer;
 
   @Setup(Level.Trial)
@@ -118,6 +123,18 @@ public class ExpressionAggregationBenchmark
         null,
         "if(x>0,1.0+x,y+1)",
         TestExprMacroTable.INSTANCE
+    );
+
+    // One buffer is shared by every benchmark method here, so it has to fit the largest
+    // aggregator. Sizing it from the factories rather than hardcoding Double.BYTES matters:
+    // these aggregators are wrapped in a NullableNumericBufferAggregator, which prepends a
+    // null-flag byte. getMaxIntermediateSize() reports only the value, so the size that
+    // actually gets written is getMaxIntermediateSizeWithNulls().
+    this.aggregationBuffer = ByteBuffer.allocate(
+        Math.max(
+            javaScriptAggregatorFactory.getMaxIntermediateSizeWithNulls(),
+            expressionAggregatorFactory.getMaxIntermediateSizeWithNulls()
+        )
     );
   }
 

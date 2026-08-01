@@ -1,0 +1,181 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: "Benchmarks"
+
+# Opt-in only: apply the "benchmark" label to a PR to run the curated JMH query suite.
+# There is deliberately no paths filter -- the label is the filter. This workflow is
+# independent of the other CI workflows, so it starts as soon as the label lands and runs
+# alongside the unit tests and static checks rather than queueing behind them.
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      jmh_args:
+        description: "Global JMH args (overrides @Warmup/@Measurement/@Fork)"
+        required: false
+        type: string
+      rounds:
+        description: "Number of alternating base/head rounds"
+        required: false
+        type: string
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.run_id }}'
+  cancel-in-progress: true
+
+jobs:
+  # The two builds are the long pole, and neither depends on the other, so they run as a
+  # matrix in parallel. Only the measurement has to happen on a single machine -- a jar does
+  # not care where it was compiled -- so this halves the critical path.
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'benchmark') }}
+    name: "Build ${{ matrix.variant }} jar"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        variant: [base, head]
+    steps:
+      - name: Checkout ${{ matrix.variant }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.variant == 'base' && (github.event.pull_request.base.sha || github.sha) || github.sha }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '25'
+          cache: 'maven'
+
+      - name: Build benchmarks.jar
+        run: .github/scripts/build_benchmark_jar.sh /tmp/jars/${{ matrix.variant }}.jar
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-jar-${{ matrix.variant }}
+          path: /tmp/jars/${{ matrix.variant }}.jar
+          retention-days: 1
+          # The jar is already deflated; recompressing ~235MB buys nothing but time.
+          compression-level: 0
+
+  # The suite is split across shards by cost. Each shard runs base and head for its own
+  # entries, so every A/B pair still runs back to back on one machine -- results from
+  # different benchmarks are never compared with each other, so they need not share a runner.
+  benchmark:
+    name: "Benchmarks (shard ${{ matrix.shard }}/3)"
+    needs: build
+    runs-on: ubuntu-latest
+    # Measurement only -- the builds already happened. Both jars run alternately on this one
+    # runner so that drift and noisy neighbours affect base and head equally.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      # Scripts and the suite file always come from the PR head, so a PR can change what is
+      # measured. The jars, not this checkout, decide which Druid code runs.
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '25'
+          cache: 'maven'
+
+      - name: Download jars
+        uses: actions/download-artifact@v8
+        with:
+          pattern: benchmark-jar-*
+          merge-multiple: true
+          path: /tmp/jars
+
+      - name: Run A/B benchmarks
+        env:
+          BASE_JAR: /tmp/jars/base.jar
+          HEAD_JAR: /tmp/jars/head.jar
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 3
+          SKIP_COMPARE: "true"
+          JMH_ARGS: ${{ inputs.jmh_args }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: .github/scripts/run_benchmarks.sh
+
+      - name: Upload shard results
+        uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: benchmark-json-shard-${{ matrix.shard }}
+          path: /tmp/bench/out/*.json
+          retention-days: 1
+          if-no-files-found: ignore
+
+  # Merges every shard's JSON and renders one report. Kept separate from the shards so the
+  # comparison always sees the whole suite.
+  compare:
+    name: "Compare and report"
+    needs: benchmark
+    if: ${{ always() && needs.benchmark.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download shard results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: benchmark-json-shard-*
+          merge-multiple: true
+          path: /tmp/bench/out
+
+      - name: Compare base vs head
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ROUNDS: ${{ inputs.rounds || '2' }}
+          JMH_ARGS: ${{ inputs.jmh_args }}
+        run: |
+          set -eu
+          mkdir -p /tmp/bench
+          python3 .github/scripts/compare_benchmarks.py \
+            --results /tmp/bench/out \
+            --jmh-args "${JMH_ARGS:--f 1 -wi 5 -i 10 -w 1s -r 1s}" \
+            --rounds "$ROUNDS" \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            > /tmp/bench/comment.md
+          cat /tmp/bench/comment.md >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/bench/comment.md
+          if [ -n "${PR_NUMBER:-}" ]; then
+            echo "$PR_NUMBER" > /tmp/bench/pr-number.txt
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: benchmark-results
+          path: |
+            /tmp/bench/out/*.json
+            /tmp/bench/comment.md
+            /tmp/bench/pr-number.txt
+          if-no-files-found: ignore

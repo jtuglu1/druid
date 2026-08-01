@@ -146,56 +146,60 @@ public class ExpressionVectorSelectorBenchmark
     final CursorBuildSpec buildSpec = CursorBuildSpec.builder()
                                                      .setVirtualColumns(virtualColumns)
                                                      .build();
-    final CursorHolder cursorHolder = closer.register(
-        new QueryableIndexCursorFactory(index).makeCursorHolder(buildSpec)
-    );
-    if (vectorize) {
-      VectorCursor cursor = cursorHolder.asVectorCursor();
-      if (outputType.isNumeric()) {
-        VectorValueSelector selector = cursor.getColumnSelectorFactory().makeValueSelector("v");
-        if (outputType.is(ExprType.DOUBLE)) {
-          while (!cursor.isDone()) {
-            blackhole.consume(selector.getDoubleVector());
-            blackhole.consume(selector.getNullVector());
-            cursor.advance();
-          }
-        } else {
-          while (!cursor.isDone()) {
-            blackhole.consume(selector.getLongVector());
-            blackhole.consume(selector.getNullVector());
-            cursor.advance();
-          }
-        }
-      }
-    } else {
-      final Cursor cursor = cursorHolder.asCursor();
-      final ColumnValueSelector selector = cursor.getColumnSelectorFactory().makeColumnValueSelector("v");
-      int rowCount = 0;
-      if (outputType.isNumeric()) {
-        if (outputType.is(ExprType.DOUBLE)) {
-          while (!cursor.isDone()) {
-            blackhole.consume(selector.isNull());
-            blackhole.consume(selector.getDouble());
-            rowCount++;
-            cursor.advance();
-          }
-        } else {
-          while (!cursor.isDone()) {
-            blackhole.consume(selector.isNull());
-            blackhole.consume(selector.getLong());
-            rowCount++;
-            cursor.advance();
+    // Closed per invocation rather than registered with the trial-scoped closer. A CursorHolder
+    // holds decompression buffers borrowed from CompressedPools, so deferring the close until
+    // teardown leaks one holder per invocation and exhausts direct memory part-way through a
+    // measurement run.
+    try (final CursorHolder cursorHolder =
+             new QueryableIndexCursorFactory(index).makeCursorHolder(buildSpec)) {
+      if (vectorize) {
+        VectorCursor cursor = cursorHolder.asVectorCursor();
+        if (outputType.isNumeric()) {
+          VectorValueSelector selector = cursor.getColumnSelectorFactory().makeValueSelector("v");
+          if (outputType.is(ExprType.DOUBLE)) {
+            while (!cursor.isDone()) {
+              blackhole.consume(selector.getDoubleVector());
+              blackhole.consume(selector.getNullVector());
+              cursor.advance();
+            }
+          } else {
+            while (!cursor.isDone()) {
+              blackhole.consume(selector.getLongVector());
+              blackhole.consume(selector.getNullVector());
+              cursor.advance();
+            }
           }
         }
       } else {
-        while (!cursor.isDone()) {
-          blackhole.consume(selector.getObject());
-          rowCount++;
-          cursor.advance();
+        final Cursor cursor = cursorHolder.asCursor();
+        final ColumnValueSelector selector = cursor.getColumnSelectorFactory().makeColumnValueSelector("v");
+        int rowCount = 0;
+        if (outputType.isNumeric()) {
+          if (outputType.is(ExprType.DOUBLE)) {
+            while (!cursor.isDone()) {
+              blackhole.consume(selector.isNull());
+              blackhole.consume(selector.getDouble());
+              rowCount++;
+              cursor.advance();
+            }
+          } else {
+            while (!cursor.isDone()) {
+              blackhole.consume(selector.isNull());
+              blackhole.consume(selector.getLong());
+              rowCount++;
+              cursor.advance();
+            }
+          }
+        } else {
+          while (!cursor.isDone()) {
+            blackhole.consume(selector.getObject());
+            rowCount++;
+            cursor.advance();
+          }
         }
-      }
 
-      blackhole.consume(rowCount);
+        blackhole.consume(rowCount);
+      }
     }
   }
 

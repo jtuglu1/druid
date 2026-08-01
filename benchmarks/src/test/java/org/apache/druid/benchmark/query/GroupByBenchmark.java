@@ -42,6 +42,7 @@ import org.apache.druid.java.util.common.guava.Yielder;
 import org.apache.druid.java.util.common.guava.Yielders;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.offheap.OffheapBufferGenerator;
 import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
@@ -126,6 +127,10 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 15)
 public class GroupByBenchmark
 {
+  static {
+    ExpressionProcessing.initializeForTests();
+  }
+
   @Param({"4"})
   private int numProcessingThreads;
 

@@ -138,7 +138,9 @@ public class DataSketchesHllBenchmark
   public Object initAndSerde()
   {
     aggregator.init(buf, 0);
-    return aggregatorFactory.deserialize(((HllSketch) aggregator.get(buf, 0)).toCompactByteArray());
+    return aggregatorFactory.deserialize(
+        ((HllSketchHolder) aggregator.get(buf, 0)).getSketch().toCompactByteArray()
+    );
   }
 
   @Setup(Level.Invocation)
