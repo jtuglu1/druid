@@ -54,6 +54,7 @@ import org.apache.druid.segment.TestDataSource;
 import org.apache.druid.server.coordination.DruidServerMetadata;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.server.coordinator.DruidCoordinator;
+import org.apache.druid.server.coordinator.SegmentPlacementBroadcaster;
 import org.apache.druid.server.coordinator.rules.CannotMatchBehavior;
 import org.apache.druid.server.coordinator.rules.ExactProjectionPartialLoadMatcher;
 import org.apache.druid.server.coordinator.rules.IntervalDropRule;
@@ -177,7 +178,8 @@ public class DataSourcesResourceTest
       overlordClient,
       AuthTestUtils.TEST_AUTHORIZER_MAPPER,
       null,
-      auditManager
+      auditManager,
+        null
     );
   }
 
@@ -289,7 +291,9 @@ public class DataSourcesResourceTest
     };
 
     DataSourcesResource dataSourcesResource =
-        new DataSourcesResource(inventoryView, null, null, overlordClient, authMapper, null, auditManager);
+        new DataSourcesResource(inventoryView, null, null, overlordClient, authMapper, null, auditManager,
+        null
+    );
     Response response = dataSourcesResource.getQueryableDataSources("full", null, request);
     Set<ImmutableDruidDataSource> result = (Set<ImmutableDruidDataSource>) response.getEntity();
 
@@ -667,8 +671,9 @@ public class DataSourcesResourceTest
             null,
             null,
             null,
-            auditManager
-        );
+            auditManager,
+        null
+    );
 
     // test dropped
     EasyMock.expect(databaseRuleManager.getRulesWithDefault(TestDataSource.WIKI))
@@ -730,6 +735,76 @@ public class DataSourcesResourceTest
     EasyMock.verify(inventoryView, databaseRuleManager);
   }
 
+  /**
+   * Handoff is the higher-frequency instance of the move race: the task unannounces the moment this returns true, and
+   * that unannouncement is not Coordinator-issued. So with the placement stream on, handoff is not confirmed until
+   * Brokers know about the historical that took the segment. See apache/druid#18738.
+   */
+  @Test
+  public void testHandOffWaitsForBrokersToLearnAboutTheHistorical()
+  {
+    final SegmentPlacementBroadcaster broadcaster = new SegmentPlacementBroadcaster();
+    final MetadataRuleManager ruleManager = EasyMock.createMock(MetadataRuleManager.class);
+    final CoordinatorServerView view = EasyMock.createMock(CoordinatorServerView.class);
+    try {
+      broadcaster.brokerDiscovered("broker-1");
+      broadcaster.getChangesSince("broker-1", broadcaster.getLastCounter(), 60_000);
+
+      final String interval = "2013-01-02T02:00:00Z/2013-01-02T03:00:00Z";
+      final SegmentLoadInfo segmentLoadInfo = new SegmentLoadInfo(createSegment(Intervals.of(interval), "v1", 1));
+      segmentLoadInfo.addServer(createHistoricalServerMetadata("test"));
+      final VersionedIntervalTimeline<String, SegmentLoadInfo> timeline =
+          new VersionedIntervalTimeline<>(null)
+      {
+        @Override
+        public List<TimelineObjectHolder<String, SegmentLoadInfo>> lookupWithIncompletePartitions(Interval queried)
+        {
+          PartitionHolder<SegmentLoadInfo> partitionHolder =
+              new PartitionHolder<>(new NumberedPartitionChunk<>(1, 1, segmentLoadInfo));
+          List<TimelineObjectHolder<String, SegmentLoadInfo>> ret = new ArrayList<>();
+          ret.add(new TimelineObjectHolder<>(Intervals.of(interval), "v1", partitionHolder));
+          return ret;
+        }
+      };
+
+      final Rule loadRule = new IntervalLoadRule(Intervals.of("2013-01-02T00:00:00Z/2013-01-03T00:00:00Z"), null, null);
+      final Rule dropRule = new IntervalDropRule(Intervals.of("2013-01-01T00:00:00Z/2013-01-03T00:00:00Z"));
+
+      EasyMock.expect(ruleManager.getRulesWithDefault(TestDataSource.WIKI))
+              .andReturn(ImmutableList.of(loadRule, dropRule))
+              .anyTimes();
+      EasyMock.expect(view.getTimeline(new TableDataSource(TestDataSource.WIKI)))
+              .andReturn(timeline)
+              .anyTimes();
+      EasyMock.replay(view, ruleManager);
+
+      final DataSourcesResource resource = new DataSourcesResource(
+          view,
+          null,
+          ruleManager,
+          null,
+          null,
+          null,
+          null,
+          broadcaster
+      );
+
+      Assert.assertFalse(
+          "Handoff must not be confirmed while a Broker has not consumed the placement",
+          (boolean) resource.isHandOffComplete(TestDataSource.WIKI, interval, 1, "v1").getEntity()
+      );
+
+      broadcaster.getChangesSince("broker-1", broadcaster.getLastCounter(), 60_000);
+
+      Assert.assertTrue(
+          (boolean) resource.isHandOffComplete(TestDataSource.WIKI, interval, 1, "v1").getEntity()
+      );
+    }
+    finally {
+      broadcaster.stop();
+    }
+  }
+
   @Test
   public void testIsHandOffCompleteSegmentNotInMetadataReturnsTrue()
   {
@@ -752,8 +827,9 @@ public class DataSourcesResourceTest
             null,
             null,
             null,
-            auditManager
-        );
+            auditManager,
+        null
+    );
     EasyMock.expect(databaseRuleManager.getRulesWithDefault(TestDataSource.WIKI))
             .andReturn(ImmutableList.of(partialRule))
             .once();
@@ -794,8 +870,9 @@ public class DataSourcesResourceTest
             null,
             null,
             null,
-            auditManager
-        );
+            auditManager,
+        null
+    );
     String interval = "2013-01-01T01:00:00Z/2013-01-01T02:00:00Z";
     DataSegment segment = buildHandoffSegment(TestDataSource.WIKI, Intervals.of(interval), "v1", 1);
 
@@ -842,8 +919,9 @@ public class DataSourcesResourceTest
             null,
             null,
             null,
-            auditManager
-        );
+            auditManager,
+        null
+    );
 
     String interval = "2013-01-01T01:00:00Z/2013-01-01T02:00:00Z";
     // Segment exposes projections [other_daily] which the partial rule's matcher (asking for "user_daily") cannot
@@ -893,8 +971,9 @@ public class DataSourcesResourceTest
             null,
             null,
             null,
-            auditManager
-        );
+            auditManager,
+        null
+    );
 
     String interval = "2013-01-01T01:00:00Z/2013-01-01T02:00:00Z";
     DataSegment segment = buildHandoffSegment(
@@ -1882,7 +1961,9 @@ public class DataSourcesResourceTest
     EasyMock.replay(segmentsMetadataManager, druidCoordinator);
 
     DataSourcesResource dataSourcesResource =
-        new DataSourcesResource(null, segmentsMetadataManager, null, null, null, druidCoordinator, auditManager);
+        new DataSourcesResource(null, segmentsMetadataManager, null, null, null, druidCoordinator, auditManager,
+        null
+    );
     Response response = dataSourcesResource.getDatasourceLoadstatus(TestDataSource.WIKI, true, null, null, "full", null);
     Assert.assertEquals(200, response.getStatus());
     Assert.assertNotNull(response.getEntity());
@@ -1941,7 +2022,9 @@ public class DataSourcesResourceTest
     EasyMock.replay(segmentsMetadataManager, druidCoordinator);
 
     DataSourcesResource dataSourcesResource =
-        new DataSourcesResource(null, segmentsMetadataManager, null, null, null, druidCoordinator, auditManager);
+        new DataSourcesResource(null, segmentsMetadataManager, null, null, null, druidCoordinator, auditManager,
+        null
+    );
     Response response = dataSourcesResource.getDatasourceLoadstatus(TestDataSource.WIKI, true, null, null, "full", "computeUsingClusterView");
     Assert.assertEquals(200, response.getStatus());
     Assert.assertNotNull(response.getEntity());

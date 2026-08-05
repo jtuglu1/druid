@@ -20,3 +20,5 @@
 org.apache.druid.testing.embedded.query.ServerManagerForQueryErrorTestModule
 org.apache.druid.testing.embedded.gcs.GoogleStorageTestModule
 org.apache.druid.testing.embedded.auth.TestTLSCertificateCheckerModule
+
+org.apache.druid.testing.embedded.server.DelayedSyncServerViewModule

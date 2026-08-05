@@ -40,6 +40,7 @@ import org.apache.druid.client.DirectDruidClientFactory;
 import org.apache.druid.client.HttpServerInventoryViewResource;
 import org.apache.druid.client.coordinator.Coordinator;
 import org.apache.druid.discovery.DruidLeaderSelector;
+import org.apache.druid.discovery.DruidNodeDiscoveryProvider;
 import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.guice.Jerseys;
 import org.apache.druid.guice.JsonConfigProvider;
@@ -75,6 +76,7 @@ import org.apache.druid.server.compaction.CompactionStatusTracker;
 import org.apache.druid.server.coordinator.CloneStatusManager;
 import org.apache.druid.server.coordinator.CoordinatorConfigManager;
 import org.apache.druid.server.coordinator.DruidCoordinator;
+import org.apache.druid.server.coordinator.SegmentPlacementBroadcaster;
 import org.apache.druid.server.coordinator.balancer.BalancerStrategyFactory;
 import org.apache.druid.server.coordinator.balancer.DiskNormalizedCostBalancerStrategyConfig;
 import org.apache.druid.server.coordinator.config.CoordinatorKillConfigs;
@@ -82,6 +84,7 @@ import org.apache.druid.server.coordinator.config.CoordinatorPeriodConfig;
 import org.apache.druid.server.coordinator.config.CoordinatorRunConfig;
 import org.apache.druid.server.coordinator.config.DruidCoordinatorConfig;
 import org.apache.druid.server.coordinator.config.HttpLoadQueuePeonConfig;
+import org.apache.druid.server.coordinator.config.SegmentPlacementStreamConfig;
 import org.apache.druid.server.coordinator.duty.CoordinatorCustomDuty;
 import org.apache.druid.server.coordinator.duty.CoordinatorCustomDutyGroup;
 import org.apache.druid.server.coordinator.duty.CoordinatorCustomDutyGroups;
@@ -102,6 +105,7 @@ import org.apache.druid.server.http.MetadataResource;
 import org.apache.druid.server.http.RedirectFilter;
 import org.apache.druid.server.http.RedirectInfo;
 import org.apache.druid.server.http.RulesResource;
+import org.apache.druid.server.http.SegmentPlacementResource;
 import org.apache.druid.server.http.SelfDiscoveryResource;
 import org.apache.druid.server.http.ServersResource;
 import org.apache.druid.server.http.TiersResource;
@@ -115,6 +119,8 @@ import org.apache.druid.server.router.TieredBrokerConfig;
 import org.apache.druid.storage.local.LocalTmpStorageConfig;
 import org.eclipse.jetty.server.Server;
 import org.joda.time.Duration;
+
+import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -199,6 +205,7 @@ public class CliCoordinator extends ServerRunnable
             JsonConfigProvider.bind(binder, "druid.coordinator.kill", CoordinatorKillConfigs.class);
             JsonConfigProvider.bind(binder, "druid.coordinator.period", CoordinatorPeriodConfig.class);
             JsonConfigProvider.bind(binder, "druid.coordinator.loadqueuepeon.http", HttpLoadQueuePeonConfig.class);
+            JsonConfigProvider.bind(binder, "druid.coordinator.segmentPlacement", SegmentPlacementStreamConfig.class);
             JsonConfigProvider.bind(binder, "druid.coordinator.balancer", BalancerStrategyFactory.class);
             JsonConfigProvider.bind(binder, "druid.coordinator.balancer.diskNormalized", DiskNormalizedCostBalancerStrategyConfig.class);
             JsonConfigProvider.bind(binder, "druid.coordinator.segment", CoordinatorSegmentWatcherConfig.class);
@@ -265,6 +272,7 @@ public class CliCoordinator extends ServerRunnable
             Jerseys.addResource(binder, LookupCoordinatorResource.class);
             Jerseys.addResource(binder, ClusterResource.class);
             Jerseys.addResource(binder, HttpServerInventoryViewResource.class);
+            Jerseys.addResource(binder, SegmentPlacementResource.class);
 
             LifecycleModule.register(binder, Server.class);
             LifecycleModule.register(binder, DataSourcesResource.class);
@@ -314,6 +322,46 @@ public class CliCoordinator extends ServerRunnable
                 httpClient,
                 coordinatorConfigManager::getCurrentDynamicConfig
             );
+          }
+
+          /**
+           * Null when the placement stream is disabled, which is what leaves Brokers driving their timelines purely
+           * from per-data-node syncs, exactly as before this existed.
+           */
+          @Provides
+          @LazySingleton
+          @Nullable
+          public SegmentPlacementBroadcaster getSegmentPlacementBroadcaster(
+              SegmentPlacementStreamConfig config,
+              DruidNodeDiscoveryProvider discoveryProvider,
+              Lifecycle lifecycle
+          )
+          {
+            if (!config.isEnabled()) {
+              return null;
+            }
+
+            final SegmentPlacementBroadcaster broadcaster = new SegmentPlacementBroadcaster();
+            // Stage.SERVER, because DruidNodeDiscoveryProvider is only usable once it has itself started, which it has
+            // not at the point this is provisioned.
+            lifecycle.addHandler(
+                new Lifecycle.Handler()
+                {
+                  @Override
+                  public void start()
+                  {
+                    broadcaster.registerWith(discoveryProvider);
+                  }
+
+                  @Override
+                  public void stop()
+                  {
+                    broadcaster.stop();
+                  }
+                },
+                Lifecycle.Stage.SERVER
+            );
+            return broadcaster;
           }
         }
     );

@@ -211,6 +211,7 @@ public class CoordinatorSimulationBuilder
         env.coordinatorConfig,
         env.metadataManager,
         env.coordinatorInventoryView,
+        null,
         env.serviceEmitter,
         env.executorFactory,
         new SimOverlordClient(env.segmentManager),
@@ -484,7 +485,7 @@ public class CoordinatorSimulationBuilder
           new CoordinatorPeriodConfig(null, null),
           CoordinatorKillConfigs.DEFAULT,
           createBalancerStrategy(balancerStrategy),
-          new HttpLoadQueuePeonConfig(null, null, null)
+          new HttpLoadQueuePeonConfig(null, null, null, null)
       );
 
       JacksonConfigManager jacksonConfigManager = mockConfigManager();

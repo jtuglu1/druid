@@ -28,6 +28,9 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import org.apache.druid.client.coordinator.NoopCoordinatorClient;
 import org.apache.druid.client.selector.HighestPriorityTierSelectorStrategy;
 import org.apache.druid.client.selector.LowestPriorityTierSelectorStrategy;
 import org.apache.druid.client.selector.RandomServerSelectorStrategy;
@@ -44,10 +47,12 @@ import org.apache.druid.query.QueryWatcher;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.segment.realtime.appenderator.SegmentSchemas;
 import org.apache.druid.server.coordination.DruidServerMetadata;
+import org.apache.druid.server.coordination.SegmentPlacementChange;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.server.coordination.TestCoordinatorClient;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.TimelineLookup;
 import org.apache.druid.timeline.TimelineObjectHolder;
 import org.apache.druid.timeline.partition.NoneShardSpec;
@@ -62,11 +67,14 @@ import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 public class BrokerServerViewTest
@@ -80,6 +88,9 @@ public class BrokerServerViewTest
 
   private TestServerInventoryView baseView;
   private BrokerServerView brokerServerView;
+  private SegmentAvailabilityTracker availabilityTracker;
+  private CoordinatorPlacementView placementView;
+  private TestAvailabilityCoordinatorClient availabilityCoordinatorClient;
   private final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig;
 
   public BrokerServerViewTest()
@@ -133,11 +144,21 @@ public class BrokerServerViewTest
     baseView.removeSegment(druidServer, segment);
     Assert.assertTrue(awaitLatch(segmentRemovedLatch));
 
+    // Losing the last server no longer removes the segment outright: it is kept, with no server, until the
+    // Coordinator says whether it should have been available. See apache/druid#18716.
+    Assert.assertEquals(1, timeline.lookup(intervals).size());
+    Assert.assertTrue(selector.isEmpty());
+    Assert.assertEquals(1, availabilityTracker.getNumTrackedSegments());
+
+    // The Coordinator has no record of it, so it was legitimately removed and the timeline entry goes away.
+    availabilityTracker.runChecks();
+
     Assert.assertEquals(
         0,
         timeline.lookup(intervals).size()
     );
     Assert.assertNull(timeline.findChunk(intervals, "v1", partition));
+    Assert.assertEquals(0, availabilityTracker.getNumTrackedSegments());
   }
 
   @Test
@@ -191,6 +212,8 @@ public class BrokerServerViewTest
     // unannounce the segment created by dataSegmentWithIntervalAndVersion("2011-04-01/2011-04-09", "v2")
     baseView.removeSegment(druidServers.get(2), segments.get(2));
     Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+    // The Coordinator has no record of it, so the retained entry is evicted from the timeline.
+    availabilityTracker.runChecks();
 
     // renew segmentRemovedLatch since we still have 4 segments to unannounce
     segmentRemovedLatch = new CountDownLatch(4);
@@ -220,6 +243,7 @@ public class BrokerServerViewTest
       }
     }
     Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+    availabilityTracker.runChecks();
 
     Assert.assertEquals(
         0,
@@ -808,6 +832,14 @@ public class BrokerServerViewTest
         EasyMock.createMock(HttpClient.class)
     );
 
+    availabilityCoordinatorClient = new TestAvailabilityCoordinatorClient();
+    availabilityTracker = new SegmentAvailabilityTracker(availabilityCoordinatorClient, brokerSegmentWatcherConfig);
+    // Never started, so it never talks to a Coordinator; tests drive it directly.
+    placementView = new CoordinatorPlacementView(new DefaultObjectMapper(),
+        EasyMock.createNiceMock(HttpClient.class),
+        new NoopCoordinatorClient(),
+        "test-broker:8082"
+    );
     brokerServerView = new BrokerServerView(
         druidClientFactory,
         baseView,
@@ -815,12 +847,290 @@ public class BrokerServerViewTest
         realtimeStrategy,
         new NoopServiceEmitter(),
         brokerSegmentWatcherConfig,
-        brokerViewOfCoordinatorConfig
+        brokerViewOfCoordinatorConfig,
+        availabilityTracker,
+        placementView
     );
 
     baseView.start();
     baseView.markInventoryInitialized();
     brokerServerView.start();
+  }
+
+  @Test
+  public void testUnavailableSegmentIsRetainedAndMarkedExpectedAvailable() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer druidServer = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(druidServer, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    // The Coordinator says the segment is used and wants a replica of it, so losing its only server means results
+    // would be silently incomplete.
+    availabilityCoordinatorClient.setStatus(segment, new SegmentAvailabilityStatus(true, 1));
+    baseView.removeSegment(druidServer, segment);
+    Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+    availabilityTracker.runChecks();
+
+    final TimelineLookup<String, ServerSelector> timeline = brokerServerView.getTimeline(
+        new TableDataSource("test_broker_server_view")
+    ).get();
+    Assert.assertEquals(1, timeline.lookup(interval).size());
+
+    final ServerSelector selector = timeline.lookup(interval).get(0).getObject().iterator().next().getObject();
+    Assert.assertTrue(selector.isEmpty());
+    Assert.assertEquals(SegmentAvailability.EXPECTED_AVAILABLE, selector.getAvailability());
+    Assert.assertEquals(1, availabilityTracker.getNumUnavailableSegments());
+  }
+
+  @Test
+  public void testSegmentWithZeroRequiredReplicasIsNotReportedUnavailable() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer druidServer = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(druidServer, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    // Used, but the rules ask for no replicas, so it is queryable only from deep storage and its absence from the
+    // timeline is expected.
+    availabilityCoordinatorClient.setStatus(segment, new SegmentAvailabilityStatus(true, 0));
+    baseView.removeSegment(druidServer, segment);
+    Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+    availabilityTracker.runChecks();
+
+    Assert.assertEquals(
+        0,
+        brokerServerView.getTimeline(new TableDataSource("test_broker_server_view")).get().lookup(interval).size()
+    );
+    Assert.assertEquals(0, availabilityTracker.getNumUnavailableSegments());
+  }
+
+  @Test
+  public void testSegmentThatRegainsAServerStopsBeingTracked() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer serverA = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DruidServer serverB = setupHistoricalServer("default_tier", "localhost:5678", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    availabilityCoordinatorClient.setStatus(segment, new SegmentAvailabilityStatus(true, 1));
+    baseView.removeSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+    availabilityTracker.runChecks();
+    Assert.assertEquals(1, availabilityTracker.getNumUnavailableSegments());
+
+    // This is the load half of a move landing after the drop: the segment is available again and must stop being
+    // reported. See apache/druid#18738.
+    segmentAddedLatch = new CountDownLatch(1);
+    baseView.addSegment(serverB, segment);
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    Assert.assertEquals(0, availabilityTracker.getNumTrackedSegments());
+    final ServerSelector selector = brokerServerView.getTimeline(new TableDataSource("test_broker_server_view"))
+                                                    .get()
+                                                    .lookup(interval)
+                                                    .get(0)
+                                                    .getObject()
+                                                    .iterator()
+                                                    .next()
+                                                    .getObject();
+    Assert.assertFalse(selector.isEmpty());
+    Assert.assertEquals(SegmentAvailability.UNKNOWN, selector.getAvailability());
+  }
+
+  /**
+   * A used segment the Coordinator has not evaluated load rules for yet reports a null replication factor. That is an
+   * absence of an answer, not an answer that the segment should be gone, and evicting on it would drop a live segment
+   * with nothing to put it back.
+   */
+  @Test
+  public void testUnknownReplicationFactorDoesNotEvictTheSegment() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer serverA = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    // Used, but no replication factor has been computed for it yet.
+    availabilityCoordinatorClient.setStatus(segment, new SegmentAvailabilityStatus(true, null));
+    baseView.removeSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+
+    availabilityTracker.runChecks();
+
+    Assert.assertEquals(
+        "The segment must stay in the timeline while the Coordinator has no answer for it",
+        1,
+        brokerServerView.getTimeline(new TableDataSource("test_broker_server_view")).get().lookup(interval).size()
+    );
+    Assert.assertEquals(1, availabilityTracker.getNumTrackedSegments());
+    Assert.assertEquals(
+        "UNKNOWN is not a claim that the segment is missing, so it is not counted as unavailable",
+        0,
+        availabilityTracker.getNumUnavailableSegments()
+    );
+    Assert.assertEquals(SegmentAvailability.UNKNOWN, selectorFor(interval).getAvailability());
+  }
+
+  /**
+   * Per-node removals must be applied even with the stream running.
+   * <p>
+   * The stream only ever carries removals for single-replica moves, so deferring to it would discard drops from rule
+   * changes, markUnused, over-replication and multi-replica moves -- none of which any channel would then deliver,
+   * leaving the Broker routing queries to servers that no longer hold the segment. The stream's contribution is
+   * publishing the destination early, not owning removals. See apache/druid#18738.
+   */
+  @Test
+  public void testPerNodeRemovalIsAppliedEvenWithTheStreamRunning() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer serverA = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    baseView.removeSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentRemovedLatch));
+
+    Assert.assertTrue(
+        "A drop the stream does not carry must still take the server off the selector",
+        selectorFor(interval).isEmpty()
+    );
+    Assert.assertEquals(1, availabilityTracker.getNumTrackedSegments());
+  }
+
+  /**
+   * The stream is the only thing that may remove a server, and doing so still leads to the segment being reported
+   * rather than silently dropped.
+   */
+  @Test
+  public void testStreamRemovalIsApplied() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer serverA = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    placementView.deliver(
+        List.of(SegmentPlacementChange.replicaRemoved(segment.getId(), serverA.getName()))
+    );
+
+    Assert.assertTrue(selectorFor(interval).isEmpty());
+    Assert.assertEquals(1, availabilityTracker.getNumTrackedSegments());
+  }
+
+  /**
+   * The whole guarantee in one test: the Coordinator publishes the addition before the removal, so applying a batch
+   * in order never leaves the segment without a server, whatever the per-node syncs are doing.
+   */
+  @Test
+  public void testMoveAppliedFromTheStreamNeverLeavesTheSegmentUnroutable() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(1);
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer serverA = setupHistoricalServer("default_tier", "localhost:1234", 0);
+    final DruidServer serverB = setupHistoricalServer("default_tier", "localhost:5678", 0);
+    final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final Interval interval = Intervals.of("2014-10-20T00:00:00Z/P1D");
+
+    baseView.addSegment(serverA, segment);
+    Assert.assertTrue(awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(awaitLatch(segmentAddedLatch));
+
+    // serverB's own sync has not landed; only the Coordinator knows about it yet.
+    placementView.deliver(
+        List.of(
+            SegmentPlacementChange.replicaAdded(segment.getId(), serverB.getName()),
+            SegmentPlacementChange.replicaRemoved(segment.getId(), serverA.getName())
+        )
+    );
+
+    final ServerSelector selector = selectorFor(interval);
+    Assert.assertFalse("The segment must remain routable across the move", selector.isEmpty());
+    Assert.assertEquals(serverB, selector.pick(null, CloneQueryMode.EXCLUDECLONES).getServer());
+    Assert.assertEquals(0, availabilityTracker.getNumTrackedSegments());
+  }
+
+  private void awaitCondition(BooleanSupplier condition) throws InterruptedException
+  {
+    final long deadlineMillis = System.currentTimeMillis() + 10_000;
+    while (System.currentTimeMillis() < deadlineMillis) {
+      if (condition.getAsBoolean()) {
+        return;
+      }
+      Thread.sleep(10);
+    }
+    Assert.fail("Condition was not met before the timeout.");
+  }
+
+  private ServerSelector selectorFor(Interval interval)
+  {
+    return brokerServerView.getTimeline(new TableDataSource("test_broker_server_view"))
+                           .get()
+                           .lookup(interval)
+                           .get(0)
+                           .getObject()
+                           .iterator()
+                           .next()
+                           .getObject();
   }
 
   private DataSegment dataSegmentWithIntervalAndVersion(String intervalStr, String version)
@@ -862,4 +1172,31 @@ public class BrokerServerViewTest
       baseView.stop();
     }
   }
+  /**
+   * Answers segment availability from a map the test controls, so that a test can decide whether a segment left with
+   * no server should be reported as unavailable or dropped from the timeline.
+   */
+  private static class TestAvailabilityCoordinatorClient extends NoopCoordinatorClient
+  {
+    private final Map<SegmentId, SegmentAvailabilityStatus> statuses = new HashMap<>();
+
+    void setStatus(DataSegment segment, SegmentAvailabilityStatus status)
+    {
+      statuses.put(segment.getId(), status);
+    }
+
+    @Override
+    public ListenableFuture<Map<SegmentId, SegmentAvailabilityStatus>> fetchSegmentAvailability(
+        Set<SegmentId> segmentIds
+    )
+    {
+      final Map<SegmentId, SegmentAvailabilityStatus> result = new HashMap<>();
+      for (SegmentId segmentId : segmentIds) {
+        // Default to unused, matching a Coordinator that has no record of the segment.
+        result.put(segmentId, statuses.getOrDefault(segmentId, SegmentAvailabilityStatus.UNUSED));
+      }
+      return Futures.immediateFuture(result);
+    }
+  }
+
 }

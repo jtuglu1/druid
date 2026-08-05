@@ -24,6 +24,7 @@ import org.apache.druid.timeline.DataSegment;
 
 import javax.annotation.Nullable;
 import java.util.Collections;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
@@ -38,6 +39,11 @@ public class TestLoadQueuePeon implements LoadQueuePeon
   private final ConcurrentSkipListSet<DataSegment> segmentsToDrop = new ConcurrentSkipListSet<>();
   private final ConcurrentHashMap<DataSegment, PartialLoadProfile> segmentToProfile = new ConcurrentHashMap<>();
   private final ConcurrentSkipListSet<SegmentHolder> queuedHolders = new ConcurrentSkipListSet<>();
+
+  /**
+   * Pending MOVE_FROM marks, each mapped to the server the segment is moving to.
+   */
+  private final ConcurrentHashMap<DataSegment, String> segmentsMarkedToDrop = new ConcurrentHashMap<>();
 
   private final CoordinatorRunStats stats = new CoordinatorRunStats();
 
@@ -156,20 +162,26 @@ public class TestLoadQueuePeon implements LoadQueuePeon
   }
 
   @Override
-  public void markSegmentToDrop(DataSegment segmentToLoad)
+  public void markSegmentToDrop(DataSegment segmentToLoad, String destinationServerName)
   {
-
+    segmentsMarkedToDrop.put(segmentToLoad, destinationServerName);
   }
 
   @Override
   public void unmarkSegmentToDrop(DataSegment segmentToLoad)
   {
-
+    segmentsMarkedToDrop.remove(segmentToLoad);
   }
 
   @Override
   public Set<DataSegment> getSegmentsMarkedToDrop()
   {
-    return Collections.emptySet();
+    return Collections.unmodifiableSet(segmentsMarkedToDrop.keySet());
+  }
+
+  @Override
+  public Map<DataSegment, String> getPendingMoveDestinations()
+  {
+    return Collections.unmodifiableMap(segmentsMarkedToDrop);
   }
 }

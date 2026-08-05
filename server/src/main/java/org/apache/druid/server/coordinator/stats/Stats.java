@@ -100,6 +100,13 @@ public class Stats
         = CoordinatorStat.toLogAndEmit("failedActions", "segment/loadQueue/failed", CoordinatorStat.Level.ERROR);
     public static final CoordinatorStat CANCELLED_ACTIONS
         = CoordinatorStat.toDebugAndEmit("cancelledActions", "segment/loadQueue/cancelled");
+
+    // Moves whose source replica is held until the destination is confirmed by the inventory view. The wait spans
+    // 1 + ceil(inventory lag / duty period) runs, so it is worth watching rather than assuming.
+    public static final CoordinatorStat PENDING_MOVE_CONFIRMATION
+        = CoordinatorStat.toDebugAndEmit("pendingMoveConfirmation", "segment/move/pendingConfirmation");
+    public static final CoordinatorStat PENDING_MOVE_MAX_AGE
+        = CoordinatorStat.toDebugAndEmit("pendingMoveMaxAge", "segment/move/pendingConfirmation/maxAge");
   }
 
   public static class Tier

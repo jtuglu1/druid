@@ -70,6 +70,9 @@ Most metric values reset each emission period, as specified in `druid.monitoring
 |`sqlQuery/planningTimeMs`|Milliseconds taken to plan a SQL to native query.|`id`, `nativeQueryIds`, `dataSource`, `remoteAddress`, `success`, `engine`| |
 |`sqlQuery/bytes`|Number of bytes returned in the SQL query response.|`id`, `nativeQueryIds`, `dataSource`, `remoteAddress`, `success`, `engine`| |
 |`serverview/init/time`|Time taken to initialize the broker server view. Useful to detect if brokers are taking too long to start.||Depends on the number of segments.|
+|`query/segment/unavailable`|Number of segments touched by a query that should have been available but had no server to answer for them. A non-zero value means results would have been silently incomplete; see `druid.broker.segment.unavailableSegmentPolicy`.|`dataSource`|0|
+|`segment/noServer/count`|Number of segments the Broker currently believes should be available but that have no server to answer for them. This metric is only available if the `SegmentAvailabilityMonitor` module is included.||0|
+|`segment/noServer/tracked`|Number of segments with no server that the Broker is tracking, including those whose availability the Coordinator has not confirmed yet. This metric is only available if the `SegmentAvailabilityMonitor` module is included.||0|
 |`metadatacache/init/time`|Time taken to initialize the broker segment metadata cache. Useful to detect if brokers are taking too long to start||Depends on the number of segments.|
 |`segment/metadataCache/sync/time`|Time taken to poll segment metadata from the Coordinator and update the segment metadata cache. This metric is emitted only if [metadata cache](../configuration/index.md#sql) is enabled on the Broker.||Depends on the number of segments.|
 |`segment/schemaCache/refresh/count`|Number of segments refreshed in broker segment schema cache.|`dataSource`||
@@ -455,6 +458,8 @@ These metrics are emitted by the Druid Coordinator in every run of the correspon
 |`segment/loadQueue/success`|Number of segment assignments that completed successfully.|`dataSource`, `server`|Varies|
 |`segment/loadQueue/failed`|Number of segment assignments that failed to complete.|`dataSource`, `server`|0|
 |`segment/loadQueue/cancelled`|Number of segment assignments that were canceled before completion.|`dataSource`, `server`|Varies|
+|`segment/move/pendingConfirmation`|Number of moves whose source replica is being held until the Coordinator's inventory view confirms the destination. Applies only when `druid.coordinator.loadqueuepeon.http.confirmMoveBeforeDrop` is enabled.||Varies|
+|`segment/move/pendingConfirmation/maxAge`|Age in milliseconds of the oldest move still waiting for its destination to be confirmed. A value that keeps climbing points at moves that are not completing, such as a destination that never loaded or an inventory sync that is not advancing.||Varies|
 |`segment/size`|Total size of used segments in a data source. Emitted only for data sources to which at least one used segment belongs.|`dataSource`|Varies|
 |`segment/count`|Number of used segments belonging to a data source. Emitted only for data sources to which at least one used segment belongs.|`dataSource`|< max|
 |`segment/overShadowed/count`|Number of segments marked as unused due to being overshadowed.| |Varies|

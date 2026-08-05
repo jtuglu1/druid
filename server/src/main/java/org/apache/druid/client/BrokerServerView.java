@@ -21,6 +21,7 @@ package org.apache.druid.client;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.Ordering;
+import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.google.inject.Inject;
 import org.apache.druid.client.selector.ServerSelector;
 import org.apache.druid.client.selector.TierSelectorStrategy;
@@ -36,18 +37,21 @@ import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.segment.realtime.appenderator.SegmentSchemas;
 import org.apache.druid.server.coordination.DruidServerMetadata;
+import org.apache.druid.server.coordination.SegmentPlacementChange;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.VersionedIntervalTimeline;
 import org.apache.druid.timeline.partition.PartitionChunk;
 
+import javax.annotation.Nullable;
 import javax.inject.Named;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
@@ -79,6 +83,14 @@ public class BrokerServerView implements TimelineServerView
   private final CountDownLatch initialized = new CountDownLatch(1);
   private final FilteredServerInventoryView baseView;
   private final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig;
+  private final SegmentAvailabilityTracker availabilityTracker;
+
+  /**
+   * The Coordinator's ordered placement stream, or null when it is disabled. While it is authoritative, per-node
+   * removals are ignored and only the stream may take a server off a selector; see {@link #serverRemovedSegment}.
+   */
+  @Nullable
+  private final CoordinatorPlacementView placementView;
 
   @Inject
   public BrokerServerView(
@@ -88,11 +100,19 @@ public class BrokerServerView implements TimelineServerView
       @Named(REALTIME_SELECTOR) final TierSelectorStrategy realtimeTierSelectorStrategy, // Injected from bindings set up in BrokerRealtimeSelectorModule
       final ServiceEmitter emitter,
       final BrokerSegmentWatcherConfig segmentWatcherConfig,
-      final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig
+      final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig,
+      final SegmentAvailabilityTracker availabilityTracker,
+      @Nullable final CoordinatorPlacementView placementView
   )
   {
     this.druidClientFactory = directDruidClientFactory;
     this.baseView = baseView;
+    this.availabilityTracker = availabilityTracker;
+    availabilityTracker.registerEvictionHandler(this::removeUnavailableSegments);
+    this.placementView = placementView;
+    if (placementView != null) {
+      placementView.registerChangeHandler(this::applyPlacementChanges);
+    }
     this.historicalTierSelectorStrategy = historicalTierSelectorStrategy;
     this.realtimeTierSelectorStrategy = realtimeTierSelectorStrategy;
     log.info("Using historicalTierSelectorStrategy[%s] and realtimeTierSelectorStrategy[%s]", historicalTierSelectorStrategy, realtimeTierSelectorStrategy);
@@ -306,6 +326,8 @@ public class BrokerServerView implements TimelineServerView
           }
         }
         selector.addServerAndUpdateSegment(queryableDruidServer, segment);
+        // The segment has a server again, so it is no longer a candidate for unavailability reporting.
+        availabilityTracker.untrack(segmentId);
       }
       // run the callbacks, even if the segment came from a broker, lets downstream watchers decide what to do with it
       runTimelineCallbacks(callback -> callback.segmentAdded(server, segment));
@@ -333,6 +355,14 @@ public class BrokerServerView implements TimelineServerView
         return;
       }
 
+      // Removals are always applied from the per-node sync, including while the placement stream is running. The
+      // stream's contribution is publishing "+destination" early -- and since the Coordinator does not tell the source
+      // to drop until every Broker it can wait for has consumed that, the destination is already associated by the
+      // time this removal arrives, so applying it cannot leave the segment unroutable. See apache/druid#18738.
+      //
+      // Deferring to the stream instead would be wrong: it only ever carries removals for single-replica moves, so
+      // drops from rule changes, markUnused, over-replication and multi-replica moves would be discarded here and
+      // never delivered by any other channel, stranding the Broker on servers that no longer hold the segment.
       QueryableDruidServer queryableDruidServer = clients.get(server.getName());
       if (queryableDruidServer == null) {
         log.warn(
@@ -351,23 +381,139 @@ public class BrokerServerView implements TimelineServerView
       }
 
       if (selector.isEmpty()) {
-        VersionedIntervalTimeline<String, ServerSelector> timeline = timelines.get(segment.getDataSource());
-        selectors.remove(segmentId);
-
-        final PartitionChunk<ServerSelector> removedPartition = timeline.remove(
-            segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(selector)
-        );
-
-        if (removedPartition == null) {
-          log.warn(
-              "Asked to remove timeline entry[interval: %s, version: %s] that doesn't exist",
-              segment.getInterval(),
-              segment.getVersion()
-          );
+        // Removing the timeline entry here is what makes an unavailable segment indistinguishable from one that was
+        // legitimately dropped: the segment simply vanishes, and queries silently return incomplete results. Keep it
+        // instead, and let the tracker establish with the Coordinator whether it ought to be available. See
+        // apache/druid#18716.
+        if (availabilityTracker.track(segmentId, selector)) {
+          log.debug("No server remains for segment[%s]. Retaining it while its availability is checked.", segmentId);
         } else {
-          runTimelineCallbacks(callback -> callback.segmentRemoved(segment));
+          // Only when the policy is IGNORE, which asks for exactly the pre-existing behaviour. Nothing else -- not a
+          // full tracker, not an unreachable Coordinator -- may take this branch, because dropping the entry is what
+          // makes the segment silently vanish.
+          removeSegmentFromTimeline(segment);
         }
       }
+    }
+  }
+
+  /**
+   * Applies a batch from the Coordinator's placement stream, in the order it was published.
+   * <p>
+   * Additions are applied as well as removals, even though per-node syncs also deliver them. That is the point: a
+   * Broker that has consumed a removal has necessarily consumed the addition published before it, so the segment is
+   * never left with nowhere to be queried from.
+   */
+  private void applyPlacementChanges(List<SegmentPlacementChange> changes)
+  {
+    synchronized (lock) {
+      for (SegmentPlacementChange change : changes) {
+        switch (change.getType()) {
+          case REPLICA_ADDED:
+            applyReplicaAdded(change);
+            break;
+          case REPLICA_REMOVED:
+            applyReplicaRemoved(change);
+            break;
+          case SEGMENT_UNUSED:
+            final ServerSelector unused = selectors.get(change.getSegmentId());
+            if (unused != null) {
+              removeSegmentFromTimeline(unused.getSegment());
+            }
+            break;
+          default:
+            log.warn("Ignoring placement change of unknown type[%s].", change.getType());
+        }
+      }
+    }
+  }
+
+  @GuardedBy("lock")
+  private void applyReplicaAdded(SegmentPlacementChange change)
+  {
+    final ServerSelector selector = selectors.get(change.getSegmentId());
+    if (selector == null) {
+      // Nothing to attach the server to yet. The data node's own sync creates the selector, and carries the
+      // DataSegment this stream deliberately does not.
+      return;
+    }
+
+    final QueryableDruidServer client = clients.get(change.getServerName());
+    if (client == null) {
+      log.debug("No client for server[%s]; cannot add segment[%s].", change.getServerName(), change.getSegmentId());
+      return;
+    }
+
+    if (!segmentFilter.apply(Pair.of(client.getServer().getMetadata(), selector.getSegment()))) {
+      // A server this Broker is configured not to watch, such as one in an excluded tier.
+      return;
+    }
+
+    selector.addServerAndUpdateSegment(client, selector.getSegment());
+    availabilityTracker.untrack(change.getSegmentId());
+  }
+
+  @GuardedBy("lock")
+  private void applyReplicaRemoved(SegmentPlacementChange change)
+  {
+    final ServerSelector selector = selectors.get(change.getSegmentId());
+    if (selector == null) {
+      return;
+    }
+
+    final QueryableDruidServer client = clients.get(change.getServerName());
+    if (client == null || !selector.removeServer(client)) {
+      return;
+    }
+
+    runTimelineCallbacks(callback -> callback.serverSegmentRemoved(client.getServer().getMetadata(),
+                                                                  selector.getSegment()));
+
+    if (selector.isEmpty() && !availabilityTracker.track(change.getSegmentId(), selector)) {
+      removeSegmentFromTimeline(selector.getSegment());
+    }
+  }
+
+  /**
+   * Drops a segment that has no server from the timeline, either because the Coordinator confirmed it is not
+   * expected to be available or because it can no longer be tracked.
+   */
+  private void removeUnavailableSegments(Set<SegmentId> segmentIds)
+  {
+    synchronized (lock) {
+      for (SegmentId segmentId : segmentIds) {
+        final ServerSelector selector = selectors.get(segmentId);
+        // Skip any segment that has picked up a server since the eviction was decided.
+        if (selector != null && selector.isEmpty()) {
+          removeSegmentFromTimeline(selector.getSegment());
+        }
+      }
+    }
+  }
+
+  @GuardedBy("lock")
+  private void removeSegmentFromTimeline(DataSegment segment)
+  {
+    final SegmentId segmentId = segment.getId();
+    final ServerSelector selector = selectors.remove(segmentId);
+    if (selector == null) {
+      return;
+    }
+    availabilityTracker.untrack(segmentId);
+
+    final VersionedIntervalTimeline<String, ServerSelector> timeline = timelines.get(segment.getDataSource());
+    final PartitionChunk<ServerSelector> removedPartition = timeline.remove(
+        segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(selector)
+    );
+
+    if (removedPartition == null) {
+      log.warn(
+          "Asked to remove timeline entry[interval: %s, version: %s] that doesn't exist",
+          segment.getInterval(),
+          segment.getVersion()
+      );
+    } else {
+      runTimelineCallbacks(callback -> callback.segmentRemoved(segment));
     }
   }
 

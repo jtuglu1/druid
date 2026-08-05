@@ -94,6 +94,8 @@ public class ChangeRequestHttpSyncer<T>
   private final LifecycleLock startStopLock = new LifecycleLock();
 
   private final String logIdentity;
+  @Nullable
+  private final String extraQueryParams;
   private int consecutiveFailedAttemptCount = 0;
 
   private final Stopwatch sinceSyncerStart = Stopwatch.createUnstarted();
@@ -116,6 +118,39 @@ public class ChangeRequestHttpSyncer<T>
       Listener<T> listener
   )
   {
+    this(
+        smileMapper,
+        httpClient,
+        executor,
+        baseServerURL,
+        baseRequestPath,
+        null,
+        responseTypeReferences,
+        serverTimeoutMS,
+        serverUnstabilityTimeout,
+        listener
+    );
+  }
+
+  /**
+   * @param extraQueryParams appended to every request, without a leading separator, or null. Used where the server
+   *                         needs to know who is asking -- the Coordinator's placement stream tracks how far each
+   *                         Broker has consumed it, which it can only do if requests identify their sender.
+   */
+  public ChangeRequestHttpSyncer(
+      ObjectMapper smileMapper,
+      HttpClient httpClient,
+      ScheduledExecutorService executor,
+      URL baseServerURL,
+      String baseRequestPath,
+      @Nullable String extraQueryParams,
+      TypeReference<ChangeRequestsSnapshot<T>> responseTypeReferences,
+      long serverTimeoutMS,
+      long serverUnstabilityTimeout,
+      Listener<T> listener
+  )
+  {
+    this.extraQueryParams = extraQueryParams;
     this.smileMapper = smileMapper;
     this.changeRequestsSnapshotResponseType = smileMapper.getTypeFactory().constructType(responseTypeReferences);
     this.httpClient = httpClient;
@@ -374,7 +409,7 @@ public class ChangeRequestHttpSyncer<T>
     } else {
       req = StringUtils.format("%s?counter=-1&timeout=%s", baseRequestPath, serverTimeoutMS);
     }
-    return req;
+    return extraQueryParams == null ? req : req + "&" + extraQueryParams;
   }
 
   private void addNextSyncToWorkQueue()

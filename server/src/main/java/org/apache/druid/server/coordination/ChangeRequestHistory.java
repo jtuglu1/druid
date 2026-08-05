@@ -80,8 +80,16 @@ public class ChangeRequestHistory<T>
   public void stop()
   {
     singleThreadedExecutor.shutdownNow();
-    final LinkedHashSet<CustomSettableFuture<?>> futures = new LinkedHashSet<>(waitingFutures.keySet());
-    waitingFutures.clear();
+
+    final LinkedHashSet<CustomSettableFuture<?>> futures;
+    // waitingFutures is guarded by its own monitor everywhere else it is touched. Reading it here without that lock
+    // races with a resolveWaitingFutures() already running on the executor -- shutdownNow() does not wait for it --
+    // and throws ConcurrentModificationException out of stop().
+    synchronized (waitingFutures) {
+      futures = new LinkedHashSet<>(waitingFutures.keySet());
+      waitingFutures.clear();
+    }
+
     for (CustomSettableFuture<?> theFuture : futures) {
       theFuture.setException(new IllegalStateException("Server is shutting down."));
     }

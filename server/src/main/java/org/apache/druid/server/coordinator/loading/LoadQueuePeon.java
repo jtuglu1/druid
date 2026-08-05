@@ -19,10 +19,12 @@
 
 package org.apache.druid.server.coordinator.loading;
 
+import org.apache.druid.client.ImmutableDruidServer;
 import org.apache.druid.server.coordinator.stats.CoordinatorRunStats;
 import org.apache.druid.timeline.DataSegment;
 
 import javax.annotation.Nullable;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -42,11 +44,65 @@ public interface LoadQueuePeon
 
   Set<DataSegment> getTimedOutSegments();
 
-  void markSegmentToDrop(DataSegment segmentToLoad);
+  /**
+   * Marks a segment to be dropped from this server once {@code destinationServerName} is confirmed to be serving it.
+   *
+   * @param destinationServerName the server the segment is moving to. Recording it is what lets
+   *                              {@link org.apache.druid.server.coordinator.duty.CompletePendingMoves} check the one
+   *                              server that matters rather than scanning the cluster, and stops a pre-existing
+   *                              replica elsewhere from satisfying a move whose destination never loaded.
+   */
+  void markSegmentToDrop(DataSegment segmentToLoad, String destinationServerName);
 
   void unmarkSegmentToDrop(DataSegment segmentToLoad);
 
   Set<DataSegment> getSegmentsMarkedToDrop();
+
+  /**
+   * Segments marked to drop, mapped to the server each one is moving to.
+   */
+  Map<DataSegment, String> getPendingMoveDestinations();
+
+  /**
+   * Age of the oldest mark still waiting for its destination to be confirmed, or zero if there are none.
+   */
+  default long getOldestPendingMoveAgeMillis()
+  {
+    return 0;
+  }
+
+  /**
+   * Captures {@link #getSegmentsInQueue()} and {@link #getSegmentsMarkedToDrop()} together, atomically.
+   * <p>
+   * Prefer this over calling the two getters separately: a move completing between the two calls moves the segment out
+   * of one set and into the other, so an interleaved reader can miss it in both. See {@link LoadQueueSnapshot}.
+   * <p>
+   * The default implementation is not atomic and exists only for simple test peons.
+   */
+  default LoadQueueSnapshot getQueueSnapshot()
+  {
+    return new LoadQueueSnapshot(getSegmentsInQueue(), getSegmentsMarkedToDrop());
+  }
+
+  /**
+   * Captures the queue as of {@code inventory}, retiring operations that {@code inventory} shows as already carried
+   * out and keeping those it has not caught up to yet.
+   * <p>
+   * A server acknowledges a request over HTTP well before the change shows up in the Coordinator's
+   * {@link org.apache.druid.client.ServerInventoryView}, which syncs separately. If the peon forgot the operation at
+   * ack time, the Coordinator would briefly see neither a queue entry nor an updated inventory, conclude the replica
+   * is plainly loaded (or plainly absent), and act on that -- most damagingly by dropping the last remaining replica
+   * after a move. So acknowledged operations are retained, and retired here. See apache/druid#18764.
+   * <p>
+   * Reconciling against the very snapshot the caller is going to pair the result with is what makes the two mutually
+   * consistent: an operation is reported as pending exactly when {@code inventory} does not yet reflect it.
+   *
+   * @param inventory Segment set for this server, as the caller will use it.
+   */
+  default LoadQueueSnapshot getQueueSnapshot(ImmutableDruidServer inventory)
+  {
+    return getQueueSnapshot();
+  }
 
   void loadSegment(DataSegment segment, SegmentAction action, LoadPeonCallback callback);
 

@@ -22,6 +22,8 @@ package org.apache.druid.server.http;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.base.Throwables;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -55,8 +57,11 @@ import org.apache.druid.query.TableDataSource;
 import org.apache.druid.rpc.HttpResponseException;
 import org.apache.druid.rpc.indexing.OverlordClient;
 import org.apache.druid.rpc.indexing.SegmentUpdateResponse;
+import org.apache.druid.server.coordination.ChangeRequestHistory;
 import org.apache.druid.server.coordination.DruidServerMetadata;
+import org.apache.druid.server.coordination.SegmentPlacementChange;
 import org.apache.druid.server.coordinator.DruidCoordinator;
+import org.apache.druid.server.coordinator.SegmentPlacementBroadcaster;
 import org.apache.druid.server.coordinator.rules.LoadRule;
 import org.apache.druid.server.coordinator.rules.Rule;
 import org.apache.druid.server.http.security.DatasourceResourceFilter;
@@ -98,6 +103,8 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -122,6 +129,33 @@ public class DataSourcesResource
   private final DruidCoordinator coordinator;
   private final AuditManager auditManager;
 
+  /**
+   * Null when the placement stream is disabled. When present, handoff is not confirmed until Brokers know about the
+   * historical that took the segment; see {@link #isHandOffComplete}.
+   */
+  @Nullable
+  private final SegmentPlacementBroadcaster placementBroadcaster;
+
+  /**
+   * Handoffs whose placement has been published and which are waiting for Brokers to consume it.
+   * <p>
+   * Entries expire, because the only thing that removes one on the happy path is the task asking again and being told
+   * the wait is over. A task that stops asking -- killed, failed, or restarted -- would otherwise leave its entry
+   * forever. That is not merely a leak: a later handoff of the same segment id would find the stale entry, publish no
+   * placement change at all, and be waved through against a counter every Broker consumed long ago, reporting handoff
+   * complete without ever announcing the replica.
+   */
+  private final Cache<SegmentId, ChangeRequestHistory.Counter> handoffAwaitingBrokers =
+      CacheBuilder.newBuilder()
+                  .expireAfterWrite(HANDOFF_WAIT_EXPIRY_MINUTES, TimeUnit.MINUTES)
+                  .build();
+
+  /**
+   * Generous relative to a handoff wait, which is a few Coordinator runs at most, so that an actively polling task is
+   * never cut off; it exists only to bound abandoned waits.
+   */
+  private static final long HANDOFF_WAIT_EXPIRY_MINUTES = 15;
+
   @Inject
   public DataSourcesResource(
       CoordinatorServerView serverInventoryView,
@@ -130,7 +164,8 @@ public class DataSourcesResource
       OverlordClient overlordClient,
       AuthorizerMapper authorizerMapper,
       DruidCoordinator coordinator,
-      AuditManager auditManager
+      AuditManager auditManager,
+      @Nullable SegmentPlacementBroadcaster placementBroadcaster
   )
   {
     this.serverInventoryView = serverInventoryView;
@@ -140,6 +175,7 @@ public class DataSourcesResource
     this.authorizerMapper = authorizerMapper;
     this.coordinator = coordinator;
     this.auditManager = auditManager;
+    this.placementBroadcaster = placementBroadcaster;
   }
 
   @GET
@@ -980,16 +1016,76 @@ public class DataSourcesResource
 
       Iterable<ImmutableSegmentLoadInfo> servedSegmentsInInterval =
           prepareServedSegmentsInInterval(timeline, theInterval);
-      if (isSegmentLoaded(servedSegmentsInInterval, descriptor)) {
-        return Response.ok(true).build();
+      final ImmutableSegmentLoadInfo servingReplica = findServingReplica(servedSegmentsInInterval, descriptor);
+      if (servingReplica == null) {
+        return Response.ok(false).build();
       }
 
-      return Response.ok(false).build();
+      // The task unannounces as soon as this says yes, and that unannouncement is not something the Coordinator
+      // issues -- so unless Brokers already know about the historical, handoff reproduces exactly the reordering that
+      // the placement stream exists to prevent, at a much higher frequency than balancing does.
+      // See apache/druid#18738.
+      return Response.ok(brokersKnowAboutHandoff(segmentId, servingReplica)).build();
     }
     catch (Exception e) {
       log.error(e, "Error while handling hand off check request");
       return Response.serverError().entity(ImmutableMap.of("error", e.toString())).build();
     }
+  }
+
+  private boolean brokersKnowAboutHandoff(SegmentId segmentId, ImmutableSegmentLoadInfo servingReplica)
+  {
+    if (placementBroadcaster == null) {
+      return true;
+    }
+
+    final DruidServerMetadata server = Iterables.find(
+        servingReplica.getServers(),
+        DruidServerMetadata::isSegmentReplicationTarget,
+        null
+    );
+    if (server == null) {
+      return true;
+    }
+
+    final ChangeRequestHistory.Counter published;
+    try {
+      published = handoffAwaitingBrokers.get(
+          segmentId,
+          () -> placementBroadcaster.publish(
+              List.of(SegmentPlacementChange.replicaAdded(segmentId, server.getName()))
+          )
+      );
+    }
+    catch (ExecutionException e) {
+      throw new RuntimeException(e);
+    }
+
+    if (placementBroadcaster.isConsumedByAllBrokers(published)) {
+      handoffAwaitingBrokers.invalidate(segmentId);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * The replica a handoff would complete against, or null if none is serving it yet.
+   */
+  @Nullable
+  private static ImmutableSegmentLoadInfo findServingReplica(
+      Iterable<ImmutableSegmentLoadInfo> servedSegments,
+      SegmentDescriptor descriptor
+  )
+  {
+    for (ImmutableSegmentLoadInfo segmentLoadInfo : servedSegments) {
+      if (segmentLoadInfo.getSegment().getInterval().contains(descriptor.getInterval())
+          && segmentLoadInfo.getSegment().getShardSpec().getPartitionNum() == descriptor.getPartitionNumber()
+          && segmentLoadInfo.getSegment().getVersion().compareTo(descriptor.getVersion()) >= 0
+          && Iterables.any(segmentLoadInfo.getServers(), DruidServerMetadata::isSegmentReplicationTarget)) {
+        return segmentLoadInfo;
+      }
+    }
+    return null;
   }
 
   @Nullable

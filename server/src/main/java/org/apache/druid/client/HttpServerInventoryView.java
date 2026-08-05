@@ -79,6 +79,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 /**
  * This class uses internal-discovery i.e. {@link DruidNodeDiscoveryProvider} to discover various queryable nodes in the
@@ -94,6 +95,11 @@ public class HttpServerInventoryView implements ServerInventoryView, FilteredSer
       new TypeReference<>() {};
 
   private final EmittingLogger log = new EmittingLogger(HttpServerInventoryView.class);
+
+  /**
+   * Whether every discovered server had synced at least once when the segment view was declared initialized.
+   */
+  private volatile boolean initializedWithAllServers = false;
   private final DruidNodeDiscoveryProvider druidNodeDiscoveryProvider;
 
   private final LifecycleLock lifecycleLock = new LifecycleLock();
@@ -400,18 +406,36 @@ public class HttpServerInventoryView implements ServerInventoryView, FilteredSer
     }
 
     if (uninitializedServers.isEmpty()) {
+      initializedWithAllServers = true;
       log.info("All servers have been synced successfully at least once.");
     } else {
-      for (DruidServerHolder server : uninitializedServers) {
-        log.warn(
-            "Server[%s] might not yet be synced successfully. We will continue to retry that in the background.",
-            server.druidServer.getName()
-        );
-      }
+      // The view is declared initialized either way, so this is the moment a Broker starts answering queries from a
+      // segment view it knows is incomplete -- results can be quietly short until the stragglers sync. Alert rather
+      // than warn, and record it so callers can tell the difference. See isInitializedWithAllServers().
+      log.makeAlert(
+          "Segment view initialized without [%d] server(s) having synced. Queries may return incomplete results"
+          + " until they do.",
+          uninitializedServers.size()
+      ).addData(
+          "servers",
+          uninitializedServers.stream().map(holder -> holder.druidServer.getName()).collect(Collectors.toList())
+      ).emit();
     }
 
     log.info("Invoking segment view initialized callbacks.");
     runSegmentCallbacks(SegmentCallback::segmentViewInitialized);
+  }
+
+  /**
+   * Whether every discovered server had synced at least once by the time the segment view was declared initialized.
+   * <p>
+   * {@link #isSegmentViewInitialized()} deliberately becomes true even when some servers never synced, so that a
+   * single unreachable server cannot stop a Broker starting. That makes it a weaker statement than it looks: it means
+   * "we waited", not "we have everything". Callers that care whether an answer can be complete need this instead.
+   */
+  public boolean isInitializedWithAllServers()
+  {
+    return initializedWithAllServers;
   }
 
   private void updateFinalPredicate()
@@ -533,6 +557,20 @@ public class HttpServerInventoryView implements ServerInventoryView, FilteredSer
     return holder != null && holder.druidServer.getSegment(segment.getId()) != null;
   }
 
+  /**
+   * Wraps the listener that applies one data server's segment changes to this view. Returns it unchanged; exists so
+   * that a test can subclass this view and make a single server's changes land late, which is the only way to
+   * reproduce a Broker observing a drop before the matching load. Called once per discovered server, not per change.
+   */
+  @VisibleForTesting
+  protected ChangeRequestHttpSyncer.Listener<DataSegmentChangeRequest> decorateSyncListener(
+      DruidServerMetadata server,
+      ChangeRequestHttpSyncer.Listener<DataSegmentChangeRequest> listener
+  )
+  {
+    return listener;
+  }
+
   private class DruidServerHolder
   {
     private final DruidServer druidServer;
@@ -555,7 +593,7 @@ public class HttpServerInventoryView implements ServerInventoryView, FilteredSer
             SEGMENT_LIST_RESP_TYPE_REF,
             config.getServerTimeout(),
             config.getServerUnstabilityTimeout(),
-            createSyncListener()
+            decorateSyncListener(druidServer.getMetadata(), createSyncListener())
         );
       }
       catch (MalformedURLException ex) {

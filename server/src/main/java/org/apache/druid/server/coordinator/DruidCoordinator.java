@@ -62,6 +62,7 @@ import org.apache.druid.server.coordinator.config.KillUnusedSegmentsConfig;
 import org.apache.druid.server.coordinator.duty.BalanceSegments;
 import org.apache.druid.server.coordinator.duty.CloneHistoricals;
 import org.apache.druid.server.coordinator.duty.CompactSegments;
+import org.apache.druid.server.coordinator.duty.CompletePendingMoves;
 import org.apache.druid.server.coordinator.duty.CoordinatorCustomDutyGroup;
 import org.apache.druid.server.coordinator.duty.CoordinatorCustomDutyGroups;
 import org.apache.druid.server.coordinator.duty.CoordinatorDuty;
@@ -129,6 +130,12 @@ public class DruidCoordinator
   private final ScheduledExecutorFactory executorFactory;
   private final List<DutiesRunnable> dutiesRunnables = new ArrayList<>();
   private final LoadQueueTaskMaster taskMaster;
+
+  /**
+   * Null when the placement stream is disabled; see {@link SegmentPlacementBroadcaster}.
+   */
+  @Nullable
+  private final SegmentPlacementBroadcaster placementBroadcaster;
   private final SegmentLoadQueueManager loadQueueManager;
   private final CoordinatorCustomDutyGroups customDutyGroups;
   private final BalancerStrategyFactory balancerStrategyFactory;
@@ -174,6 +181,7 @@ public class DruidCoordinator
       DruidCoordinatorConfig config,
       MetadataManager metadataManager,
       ServerInventoryView serverInventoryView,
+      @Nullable SegmentPlacementBroadcaster placementBroadcaster,
       ServiceEmitter emitter,
       ScheduledExecutorFactory scheduledExecutorFactory,
       OverlordClient overlordClient,
@@ -193,6 +201,7 @@ public class DruidCoordinator
     this.config = config;
     this.metadataManager = metadataManager;
     this.serverInventoryView = serverInventoryView;
+    this.placementBroadcaster = placementBroadcaster;
     this.emitter = emitter;
     this.overlordClient = overlordClient;
     this.taskMaster = taskMaster;
@@ -553,6 +562,7 @@ public class DruidCoordinator
             balancerStrategyFactory,
             serverInventoryView
         ),
+        new CompletePendingMoves(taskMaster, placementBroadcaster),
         new RunRules(deleteSegments, getRules),
         new UpdateReplicationStatus(),
         new CollectSegmentStats(),

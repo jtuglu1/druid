@@ -69,6 +69,11 @@ public class MockHttpServletResponse implements HttpServletResponse
   private String contentType;
   private String characterEncoding;
 
+  /**
+   * Message passed to {@link #sendError(int, String)}, if any.
+   */
+  private String errorMessage;
+
   @Override
   public void reset()
   {
@@ -80,6 +85,7 @@ public class MockHttpServletResponse implements HttpServletResponse
     statusCode = 0;
     contentType = null;
     characterEncoding = null;
+    errorMessage = null;
   }
 
 
@@ -122,13 +128,14 @@ public class MockHttpServletResponse implements HttpServletResponse
   @Override
   public void sendError(int sc, String msg)
   {
-    throw new UnsupportedOperationException();
+    statusCode = sc;
+    errorMessage = msg;
   }
 
   @Override
   public void sendError(int sc)
   {
-    throw new UnsupportedOperationException();
+    sendError(sc, null);
   }
 
   @Override
@@ -191,6 +198,12 @@ public class MockHttpServletResponse implements HttpServletResponse
   public int getStatus()
   {
     return statusCode;
+  }
+
+  @Nullable
+  public String getErrorMessage()
+  {
+    return errorMessage;
   }
 
   @Nullable
